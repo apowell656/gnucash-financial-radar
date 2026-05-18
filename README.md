@@ -168,7 +168,7 @@ Rows without any matching target metadata render exactly as they do now.
 
 ### Financial Radar
 
-![GnuCash Dashboard](gnucash_modified_dashboard.png)
+![GnuCash Dashboard](docs/images/gnucash_modified_dashboard.png)
 
 Monthly financial overview dashboard with:
 
@@ -180,7 +180,7 @@ Monthly financial overview dashboard with:
 
 ### Debt Repayment Planner
 
-![GnuCash Debt Repayment Planner](gnucash_debt_repayment_planner.png)
+![GnuCash Debt Repayment Planner](docs/images/gnucash_debt_repayment_planner.png)
 
 Debt payoff planning report with:
 
@@ -191,7 +191,7 @@ Debt payoff planning report with:
 
 ### Budget Report with Sinking Funds
 
-![GnuCash Modified Budget](modified_gnucash_budget_report.png)
+![GnuCash Modified Budget](docs/images/modified_gnucash_budget_report.png)
 
 Budget carry-forward report with:
 
