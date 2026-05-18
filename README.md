@@ -191,7 +191,7 @@ Debt payoff planning report with:
 
 ### Budget Report with Sinking Funds
 
-![GnuCash Modified Budget](gnucash_new_budget_report.png)
+![GnuCash Modified Budget](modified_gnucash_budget_report.png)
 
 Budget carry-forward report with:
 
