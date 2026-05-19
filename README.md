@@ -330,4 +330,5 @@ Budget Report with Sinking Funds options are grouped by:
 
 ## License
 
-This project is released under the MIT License.
+This project is free software released under the GNU General Public License,
+version 2 or later. See [COPYING](COPYING) for the full license text.
