@@ -295,7 +295,7 @@ Debt Repayment Planner options are grouped by:
 Budget Report with Sinking Funds options are grouped by:
 
 - General: budget selection, date range, period pickers
-- Accounts: show zero-balance categories, included accounts, exclude off-budget, hidden accounts
+- Accounts: show zero-balance categories, included accounts, exclude off-budget, hidden accounts, liability activity: payments only
 - Display: spending progress bars
 
 ## Notes
@@ -307,6 +307,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Future Purchase badges require a placeholder account named exactly `Future Purchases` somewhere above the leaf account.
 - Planning targets are set via account notes (`target=`, `target-date=`). The report reads these fields but never writes to account notes.
 - Debt assumptions are read from account notes (`apr=`, `min-payment=`, `priority=`). The report reads these fields but never writes to account notes.
+- By default, Budget Report with Sinking Funds calculates Activity for every account (including liabilities and credit cards) as the net of that account's budget actuals — payments and charges offset each other. Enabling `Accounts → Liability activity: payments only` changes Activity for liability and credit-card accounts to count only the gross payments that reduce the balance; charges, interest, fees, and payment reversals are excluded. This option affects liability/credit-card accounts only — Activity for expense, asset, income, and equity accounts is unchanged either way, and net activity remains the default.
 - Upcoming transactions depend on scheduled transaction data in the book.
 - Projected balances estimate today, midpoint, and end-of-range balances from selected accounts using entered register transactions plus scheduled transaction cash flow, using the Upcoming Transactions look-ahead period.
 
@@ -319,7 +320,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds includes only visible leaf accounts under the `Included Accounts` selection. Parent accounts are used for grouping, hidden-account filtering, and `Off Budget` subtree exclusion, not as direct budget rows.
 - Budget Report with Sinking Funds classifies an account as a Sinking Fund when it has a valid `target=` note and is not a Future Purchase. Future Purchases are detected only by the exact placeholder account name `Future Purchases`; there is no option to use a different name.
 - Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, due dates, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
-- Budget Report with Sinking Funds uses absolute values for budget actual totals, so unusual account signs or journal corrections may need review in the underlying GnuCash budget data.
+- Budget Report with Sinking Funds uses absolute values for budget actual totals, so unusual account signs or journal corrections may need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
 - Cash flow follows split signs on the selected cash/asset accounts, similar to GnuCash's built-in Cash Flow report. Selecting income, expense, or liability accounts can produce confusing results.
 - Upcoming Transactions uses scheduled transaction data. Projected Balances uses entered register transactions plus scheduled transaction data. They do not forecast from historical spending patterns.
 - The Financial Radar projected balance card uses the Upcoming Transactions look-ahead period as its projection horizon.

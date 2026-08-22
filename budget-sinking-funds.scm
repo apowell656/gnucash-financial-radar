@@ -74,6 +74,7 @@
 (define bsf-opt-show-zeros          (N_ "Show zero-balance categories"))
 (define bsf-opt-exclude-off-budget  (N_ "Exclude Off Budget accounts"))
 (define bsf-opt-hidden-accounts     (N_ "Hidden Accounts"))
+(define bsf-opt-liability-payments-only (N_ "Liability activity: payments only"))
 (define bsf-opt-show-progress       (N_ "Show spending progress bars"))
 
 ;;;============================================================
@@ -184,6 +185,11 @@
       bsf-tab-accounts bsf-opt-hidden-accounts "d"
       (N_ "Accounts to hide from this report. Selecting a parent account also hides its sub-accounts.")
       '())
+
+    (gnc-register-simple-boolean-option options
+      bsf-tab-accounts bsf-opt-liability-payments-only "e"
+      (N_ "For liability and credit-card accounts, count only splits that reduce the liability. Charges, interest, fees, and other increases are excluded. Other account types continue to use net budget activity.")
+      #f)
 
     ;; ── Display ───────────────────────────────────────────────────────
     (gnc-register-simple-boolean-option options
@@ -343,6 +349,58 @@
                      (iota (- (1+ end-period) start-period) start-period)))))
 
 ;;;============================================================
+;;; LIABILITY PAYMENT-ONLY ACTIVITY (optional)
+;;; When enabled, liability/credit accounts report Activity as gross
+;;; payments only, instead of the net of payments and charges.
+;;;============================================================
+
+;; Account types treated as debt for payment-only Activity mode.
+(define bsf-liability-account-types
+  (list ACCT-TYPE-LIABILITY ACCT-TYPE-CREDIT))
+
+(define (bsf-liability-account? acct)
+  (and (member (xaccAccountGetType acct) bsf-liability-account-types) #t))
+
+;; Sum of payment-reducing splits on ACCT posted within [start-period,
+;; end-period] (inclusive), in the account's own commodity.
+;;
+;; GnuCash records debits as positive split amounts and credits as
+;; negative ones, for every account type.  A liability/credit account
+;; carries a normal credit balance (increases are credits), so a
+;; positive xaccSplitGetAmount is a debit that reduces the liability —
+;; i.e. a payment — while a negative amount is a credit that increases
+;; it (a charge, interest, fee, or refund of a prior payment).
+;;
+;; Transaction dates are read with xaccTransGetDate (posted date), the
+;; same accessor GnuCash's own budget-period bucketing uses, so results
+;; line up with the period boundaries from gnc-budget-get-period-start-date
+;; / gnc-budget-get-period-end-date.  Voided transactions are skipped.
+(define (bsf-payment-only-actual budget acct start-period end-period)
+  (let ((range-start (gnc-budget-get-period-start-date budget start-period))
+        (range-end   (gnc-budget-get-period-end-date   budget end-period)))
+    (fold
+     (lambda (split total)
+       (let ((trans (xaccSplitGetParent split)))
+         (if (or (not trans) (xaccTransGetVoidStatus trans))
+             total
+             (let ((tdate (xaccTransGetDate trans)))
+               (if (and (>= tdate range-start) (<= tdate range-end))
+                   (let ((amt (gnc-numeric-to-double (xaccSplitGetAmount split))))
+                     (if (> amt 0.0) (+ total amt) total))
+                   total)))))
+     0.0
+     (xaccAccountGetSplitList acct))))
+
+;; Selects the Activity figure to use for ACCT: payment-only for eligible
+;; liability/credit accounts when the option is enabled, otherwise the
+;; existing net-actual calculation (which remains the default for every
+;; other account type, and for liabilities when the option is off).
+(define (bsf-select-actual budget acct start-period end-period liability-payments-only?)
+  (if (and liability-payments-only? (bsf-liability-account? acct))
+      (bsf-payment-only-actual budget acct start-period end-period)
+      (bsf-cumulative-actual budget acct start-period end-period)))
+
+;;;============================================================
 ;;; DATA COLLECTION
 ;;; Record format (indices 0–5):
 ;;;   0:acct  1:display-name  2:budgeted  3:actual  4:available
@@ -365,7 +423,8 @@
                 (loop (cdr roots))))))))
 
 (define (bsf-collect-data budget start-period end-period show-zeros?
-                          exclude-off-budget? hidden-accounts included-accounts)
+                          exclude-off-budget? hidden-accounts included-accounts
+                          liability-payments-only?)
   (let* ((root     (gnc-get-current-root-account))
          (all      (gnc-account-get-descendants root))
          (fp-roots (bsf-find-fp-roots root))
@@ -388,7 +447,8 @@
           (filter-map
            (lambda (acct)
              (let* ((bgt (bsf-cumulative-budgeted budget acct start-period end-period))
-                    (act (bsf-cumulative-actual   budget acct start-period end-period))
+                    (act (bsf-select-actual budget acct start-period end-period
+                                            liability-payments-only?))
                     (avl (- bgt act)))
                (if (or show-zeros?
                        (> (+ (abs bgt) (abs act)) 0.001)
@@ -1177,6 +1237,8 @@ body {
          (included-accounts  (or (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-included-accounts) '()))
          (exclude-off-budget? (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-exclude-off-budget))))
          (hidden-accounts    (or (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-hidden-accounts) '()))
+         (liability-payments-only?
+          (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-liability-payments-only))))
          (show-progress      (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-display bsf-opt-show-progress))))
 
          (report-title (let ((n (gnc:report-name report-obj)))
@@ -1216,7 +1278,8 @@ body {
                   (end-period   (cdr period-range))
                   (period-lbl  (bsf-period-label budget start-period end-period))
                   (records     (bsf-collect-data budget start-period end-period show-zeros?
-                                                  exclude-off-budget? hidden-accounts included-accounts))
+                                                  exclude-off-budget? hidden-accounts included-accounts
+                                                  liability-payments-only?))
                   ;; Read planning targets from account notes (all leaf records).
                   (note-parsed    (bsf-note-targets-for-records records))
                   (plan-targets   (car note-parsed))
