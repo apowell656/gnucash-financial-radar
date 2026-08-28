@@ -401,6 +401,26 @@
       (bsf-cumulative-actual budget acct start-period end-period)))
 
 ;;;============================================================
+;;; YTD REFERENCE COLUMN (optional)
+;;; When the user has chosen a date-range preset other than "Year to
+;;; date", the main Budgeted/Activity/Available columns reflect that
+;;; narrower range.  This computes a separate cumulative Jan 1-through-
+;;; today figure per account so the report can also show a "YTD"
+;;; reference column alongside the selected-range figures.
+;;;============================================================
+
+;; Returns an alist keyed by account: (acct . (ytd-bgt ytd-act ytd-avl))
+(define (bsf-compute-ytd-data budget records liability-payments-only?)
+  (let ((current-period (bsf-period-for-today budget)))
+    (map (lambda (rec)
+           (let* ((acct (list-ref rec 0))
+                  (bgt  (bsf-cumulative-budgeted budget acct 0 current-period))
+                  (act  (bsf-select-actual budget acct 0 current-period
+                                           liability-payments-only?)))
+             (cons acct (list bgt act (- bgt act)))))
+         records)))
+
+;;;============================================================
 ;;; DATA COLLECTION
 ;;; Record format (indices 0–5):
 ;;;   0:acct  1:display-name  2:budgeted  3:actual  4:available
@@ -531,9 +551,11 @@
 ;;; leaf expense account.  An account with a valid target= becomes a
 ;;; sinking fund (or keeps its future-purchase classification).
 ;;;
-;;; Target alist entry: (display-name amount date-or-#f)
-;;;   amount       — positive number
-;;;   date-or-#f   — (year . month) cons or #f
+;;; Target alist entry: (display-name amount date-or-#f freq-months-or-#f)
+;;;   amount           — positive number
+;;;   date-or-#f       — (year . month) cons or #f
+;;;   freq-months-or-#f — months per recurrence cycle, or #f for a
+;;;                       one-off (non-recurring) target
 ;;;============================================================
 
 (define bsf-month-names
@@ -578,6 +600,36 @@
     (- (+ (* year 12) month)
        (+ (* ny 12) nm))))
 
+;; Maps a "frequency=" note value to the number of months per recurrence
+;; cycle, or #f if unrecognised.
+(define (bsf-fp-parse-frequency s)
+  (let ((t (string-downcase (bsf-fp-trim s))))
+    (cond
+      ((string=? t "monthly")                            1)
+      ((or (string=? t "bimonthly") (string=? t "bi-monthly")) 2)
+      ((string=? t "quarterly")                           3)
+      ((or (string=? t "semiannual") (string=? t "semi-annual")) 6)
+      ((or (string=? t "annual") (string=? t "annually")
+           (string=? t "yearly"))                         12)
+      (else #f))))
+
+;; A recurring target's target-date is a fixed anchor, not a deadline that
+;; needs manual upkeep: given that anchor and the cycle length in months,
+;; this returns the (year . month) of the next occurrence on or after the
+;; current month, advancing the anchor forward in whole cycles as needed.
+;; Once a cycle's due date passes, the very next render already points at
+;; the following cycle — the account's Notes field is never rewritten.
+(define (bsf-fp-next-occurrence anchor-year anchor-month freq-months)
+  (let* ((now        (localtime (current-time)))
+         (cur-abs    (+ (* (+ 1900 (tm:year now)) 12) (tm:mon now)))
+         (anchor-abs (+ (* anchor-year 12) (1- anchor-month)))
+         (diff       (- cur-abs anchor-abs))
+         (next-abs   (if (<= diff 0)
+                         anchor-abs
+                         (+ anchor-abs
+                            (* freq-months
+                               (ceiling (/ diff freq-months)))))))
+    (cons (quotient next-abs 12) (1+ (remainder next-abs 12)))))
 
 ;;;============================================================
 ;;; ACCOUNT NOTE PARSING (key=value)
@@ -585,6 +637,13 @@
 ;;; notes via xaccAccountGetNotes.  Recognised fields:
 ;;;   target=<amount>           e.g. target=2600
 ;;;   target-date=<YYYY-MM-DD>  e.g. target-date=2027-05-13
+;;;   frequency=<cycle>         e.g. frequency=annual
+;;;     One of: monthly, bimonthly, quarterly, semiannual, annual
+;;;     (annually / yearly also accepted for annual).  Optional — only
+;;;     meaningful together with target-date, which then becomes a fixed
+;;;     anchor: the report auto-advances it to the next on-or-after-today
+;;;     occurrence every render, so a recurring bill (e.g. an annual car
+;;;     registration) never needs its note edited after the first cycle.
 ;;; Applied to all visible leaf expense accounts.
 ;;;============================================================
 
@@ -626,14 +685,24 @@
     (and t-kv (bsf-fp-parse-amount (cdr t-kv)) #t)))
 
 ;; For each visible leaf expense record, read account notes and extract
-;; target / target-date metadata.  Records without a valid target= are skipped.
+;; target / target-date / frequency metadata.  Records without a valid
+;; target= are skipped.
 ;; Returns (targets . warnings).
-;;   targets  : ((display-name amount date-or-#f) ...)
+;;   targets  : ((display-name amount date-or-#f freq-months-or-#f) ...)
 ;;   warnings : list of human-readable strings for bad note values.
 (define (bsf-note-targets-for-records records)
   (let* ((warnings '())
          (add-warn! (lambda (msg)
                       (set! warnings (append warnings (list msg)))))
+         (warn-bad-field!
+          (lambda (acct field raw)
+            (add-warn!
+             (string-append
+              "Account &ldquo;"
+              (gnc:html-string-sanitize (xaccAccountGetName acct))
+              "&rdquo;: invalid note &ldquo;" field "&rdquo; value &ldquo;"
+              (gnc:html-string-sanitize raw)
+              "&rdquo;"))))
          (targets
           (filter-map
            (lambda (rec)
@@ -642,36 +711,40 @@
                     (kv    (bsf-parse-note-kv
                             (or (xaccAccountGetNotes acct) "")))
                     (t-kv  (assoc "target" kv))
-                    (d-kv  (assoc "target-date" kv)))
+                    (d-kv  (assoc "target-date" kv))
+                    (f-kv  (assoc "frequency" kv)))
                (if (not t-kv)
                    #f
                    (let ((amount (bsf-fp-parse-amount (cdr t-kv))))
                      (if (not amount)
-                         (begin
-                           (add-warn!
-                            (string-append
-                             "Account &ldquo;"
-                             (gnc:html-string-sanitize (xaccAccountGetName acct))
-                             "&rdquo;: invalid note &ldquo;target&rdquo; value &ldquo;"
-                             (gnc:html-string-sanitize (cdr t-kv))
-                             "&rdquo;"))
-                           #f)
+                         (begin (warn-bad-field! acct "target" (cdr t-kv)) #f)
                          (let ((date (if d-kv
                                         (let ((d (bsf-fp-parse-date (cdr d-kv))))
                                           (if (not d)
                                               (begin
+                                                (warn-bad-field!
+                                                 acct "target-date" (cdr d-kv))
+                                                #f)
+                                              d))
+                                        #f)))
+                           (let ((freq (if f-kv
+                                           (let ((fr (bsf-fp-parse-frequency (cdr f-kv))))
+                                             (cond
+                                               ((not fr)
+                                                (warn-bad-field!
+                                                 acct "frequency" (cdr f-kv))
+                                                #f)
+                                               ((not date)
                                                 (add-warn!
                                                  (string-append
                                                   "Account &ldquo;"
                                                   (gnc:html-string-sanitize
                                                    (xaccAccountGetName acct))
-                                                  "&rdquo;: invalid note &ldquo;target-date&rdquo; value &ldquo;"
-                                                  (gnc:html-string-sanitize (cdr d-kv))
-                                                  "&rdquo;"))
+                                                  "&rdquo;: &ldquo;frequency&rdquo; has no effect without a &ldquo;target-date&rdquo;"))
                                                 #f)
-                                              d))
-                                        #f)))
-                           (list acct amount date)))))))
+                                               (else fr)))
+                                           #f)))
+                             (list acct amount date freq))))))))
            records)))
     (cons targets warnings)))
 
@@ -733,17 +806,26 @@
 ;;; PLANNING METADATA RENDERER
 ;;; Renders compact target/progress info below the category name
 ;;; for Sinking Fund or Future Purchase rows with a target entry.
-;;; target-entry is (display-name amount date-or-#f) or #f.
-;;; avl is the row's existing available value (funded so far).
+;;; target-entry is (display-name amount date-or-#f freq-months-or-#f) or #f.
+;;; funded is the true cumulative available-to-date (period 0 through
+;;; today) — NOT the row's selected-date-range Available — since
+;;; progress toward a savings target must reflect everything set aside
+;;; so far, regardless of which period range is currently on screen.
 ;;;============================================================
 
-(define (bsf-fp-render-plan avl target-entry currency)
+(define (bsf-fp-render-plan funded target-entry currency)
   (if (not target-entry)
       ""
       (let* ((fmt       (lambda (n) (bsf-fmt-money n currency)))
-             (amount    (cadr  target-entry))
-             (date      (caddr target-entry))
-             (funded    avl)
+             (amount    (cadr   target-entry))
+             (raw-date  (caddr  target-entry))
+             (freq      (cadddr target-entry))
+             ;; A recurring target's date is a fixed anchor: roll it forward
+             ;; to the next on-or-after-today occurrence so the note never
+             ;; needs manual upkeep after each cycle's bill is paid.
+             (date      (if (and raw-date freq)
+                            (bsf-fp-next-occurrence (car raw-date) (cdr raw-date) freq)
+                            raw-date))
              (remaining (max 0.0 (- amount funded)))
              (pct-raw   (if (> amount 0.001)
                             (* 100.0 (/ funded amount))
@@ -854,6 +936,7 @@ body {
   text-align: right; font-weight: 600;
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
+.col-ytd { border-left: 1px solid #f1f5f9; }
 
 /* ── Available status colors ─────────────────────────────── */
 .avl-green  { color: #15803d; }
@@ -971,12 +1054,18 @@ body {
 ;;; the subtotal budgeted / spent / available for that group.
 ;;;============================================================
 
-(define (bsf-render-group-header group-key records currency)
+(define (bsf-render-group-header group-key records currency show-ytd? ytd-data)
   (let* ((fmt       (lambda (n) (bsf-fmt-money n currency)))
          (total-bgt (fold + 0.0 (map (lambda (r) (list-ref r 2)) records)))
          (total-act (fold + 0.0 (map (lambda (r) (list-ref r 3)) records)))
          (total-avl (fold + 0.0 (map (lambda (r) (list-ref r 4)) records)))
-         (cls       (bsf-avl-class total-avl total-bgt)))
+         (cls       (bsf-avl-class total-avl total-bgt))
+         (total-ytd (and show-ytd?
+                         (fold + 0.0
+                               (map (lambda (r)
+                                      (list-ref (assq (list-ref r 0) ytd-data) 3))
+                                    records))))
+         (ytd-cls   (and show-ytd? (bsf-avl-class total-ytd total-bgt))))
     (string-append
      "<tr class='group-row'>"
      "<td class='group-name'>" (gnc:html-string-sanitize group-key) "</td>"
@@ -984,6 +1073,11 @@ body {
      "<td class='col-num group-num'>" (fmt total-act) "</td>"
      "<td class='col-avl group-num'><span class='" cls "'>"
      (fmt total-avl) "</span></td>"
+     (if show-ytd?
+         (string-append
+          "<td class='col-avl col-ytd group-num'><span class='" ytd-cls "'>"
+          (fmt total-ytd) "</span></td>")
+         "")
      "</tr>")))
 
 ;;;============================================================
@@ -992,7 +1086,12 @@ body {
 ;;;============================================================
 
 ;; fp-target: entry from the target alist — (display-name amount date-or-#f) or #f.
-(define (bsf-render-data-row rec currency indented? show-progress? fp-target)
+;; ytd-entry: (acct ytd-bgt ytd-act ytd-avl) from bsf-compute-ytd-data — always
+;; present (bsf-renderer computes ytd-data unconditionally) since Sinking Fund /
+;; Future Purchase "funded so far" must reflect true cumulative progress, not
+;; just whatever date range is currently selected for display.
+(define (bsf-render-data-row rec currency indented? show-progress? fp-target
+                              show-ytd? ytd-entry)
   (let* ((display-name (list-ref rec 1))
          (bgt          (list-ref rec 2))
          (act          (list-ref rec 3))
@@ -1001,18 +1100,27 @@ body {
          (cls          (bsf-avl-class avl bgt))
          (fmt          (lambda (n) (bsf-fmt-money n currency)))
          (leaf-name    (cdr (bsf-split-display-name display-name)))
-         (name-cls     (if indented? "col-name indent" "col-name")))
+         (name-cls     (if indented? "col-name indent" "col-name"))
+         (ytd-bgt      (and ytd-entry (list-ref ytd-entry 1)))
+         (ytd-avl      (and ytd-entry (list-ref ytd-entry 3)))
+         (ytd-cls      (and ytd-entry (bsf-avl-class ytd-avl ytd-bgt)))
+         (funded       (if ytd-entry ytd-avl avl)))
     (string-append
      "<tr>"
      "<td class='" name-cls "'>"
      (gnc:html-string-sanitize leaf-name)
      (bsf-category-badge cat-type)
-     (bsf-fp-render-plan avl fp-target currency)
+     (bsf-fp-render-plan funded fp-target currency)
      (if show-progress? (bsf-render-progress-bar act bgt cls) "")
      "</td>"
      "<td class='col-num'>" (fmt bgt) "</td>"
      "<td class='col-num'>" (fmt act) "</td>"
      "<td class='col-avl'><span class='" cls "'>" (fmt avl) "</span></td>"
+     (if show-ytd?
+         (string-append
+          "<td class='col-avl col-ytd'><span class='" ytd-cls "'>"
+          (fmt ytd-avl) "</span></td>")
+         "")
      "</tr>")))
 
 ;;;============================================================
@@ -1025,7 +1133,11 @@ body {
 ;;;============================================================
 
 ;; plan-targets: alist of (acct amount date-or-#f) entries keyed by account object.
-(define (bsf-render-section-card section-name records currency show-progress? plan-targets is-fp-section?)
+;; ytd-data: alist of (acct . (ytd-bgt ytd-act ytd-avl)) from bsf-compute-ytd-data.
+;; Always populated (used for Sinking Fund/Future Purchase funded-so-far math
+;; even when show-ytd? is false and the reference column itself is hidden).
+(define (bsf-render-section-card section-name records currency show-progress?
+                                  plan-targets is-fp-section? show-ytd? ytd-data)
   (let* ((fmt (lambda (n) (bsf-fmt-money n currency)))
          ;; For the FP section strip the "Future Purchases:" segment so the
          ;; section title is not echoed as a group header in the typical layout.
@@ -1051,7 +1163,13 @@ body {
          (total-act (fold + 0.0 (map (lambda (r) (list-ref r 3)) records)))
          (total-avl (fold + 0.0 (map (lambda (r) (list-ref r 4)) records)))
          (tot-cls   (bsf-avl-class total-avl total-bgt))
-         (n-cats    (length records)))
+         (n-cats    (length records))
+         (total-ytd (and show-ytd?
+                         (fold + 0.0
+                               (map (lambda (r)
+                                      (list-ref (assq (list-ref r 0) ytd-data) 3))
+                                    records))))
+         (tot-ytd-cls (and show-ytd? (bsf-avl-class total-ytd total-bgt))))
     (string-append
      "<div class='card'>"
      "<div class='card-hdr'>"
@@ -1068,6 +1186,7 @@ body {
      "<th class='r'>Budgeted</th>"
      "<th class='r'>Activity</th>"
      "<th class='r'>Available</th>"
+     (if show-ytd? "<th class='r'>YTD</th>" "")
      "</tr></thead>"
      (apply string-append
             (map (lambda (group)
@@ -1075,13 +1194,16 @@ body {
                           (grecs    (cdr group))
                           (header   (if (string=? gkey "")
                                         ""
-                                        (bsf-render-group-header gkey grecs currency)))
+                                        (bsf-render-group-header
+                                         gkey grecs currency show-ytd? ytd-data)))
                           (indented? (not (string=? gkey "")))
                           (rows     (apply string-append
                                            (map (lambda (r)
                                                   (bsf-render-data-row
                                                    r currency indented? show-progress?
-                                                   (assq (list-ref r 0) plan-targets)))
+                                                   (assq (list-ref r 0) plan-targets)
+                                                   show-ytd?
+                                                   (assq (list-ref r 0) ytd-data)))
                                                 grecs))))
                      (string-append
                       "<tbody class='category-section'>"
@@ -1095,6 +1217,11 @@ body {
      "<td class='col-num'>" (fmt total-act) "</td>"
      "<td class='col-avl'><span class='" tot-cls "'>"
      (fmt total-avl) "</span></td>"
+     (if show-ytd?
+         (string-append
+          "<td class='col-avl col-ytd'><span class='" tot-ytd-cls "'>"
+          (fmt total-ytd) "</span></td>")
+         "")
      "</tr>"
      "</tbody>"
      "</table>"
@@ -1106,9 +1233,11 @@ body {
 ;;; cards.
 ;;;============================================================
 
-(define (bsf-render-grand-total-card total-bgt total-act total-avl currency)
+(define (bsf-render-grand-total-card total-bgt total-act total-avl currency
+                                      show-ytd? total-ytd)
   (let* ((fmt     (lambda (n) (bsf-fmt-money n currency)))
-         (tot-cls (bsf-avl-class total-avl total-bgt)))
+         (tot-cls (bsf-avl-class total-avl total-bgt))
+         (ytd-cls (and show-ytd? (bsf-avl-class total-ytd total-bgt))))
     (string-append
      "<div class='card'>"
      "<table class='bsf-table'>"
@@ -1119,6 +1248,11 @@ body {
      "<td class='col-num'>" (fmt total-act) "</td>"
      "<td class='col-avl'><span class='" tot-cls "'>"
      (fmt total-avl) "</span></td>"
+     (if show-ytd?
+         (string-append
+          "<td class='col-avl col-ytd'><span class='" ytd-cls "'>"
+          (fmt total-ytd) "</span></td>")
+         "")
      "</tr>"
      "</tbody>"
      "</table>"
@@ -1133,7 +1267,8 @@ body {
 ;;; Empty sections are omitted.  A grand total card follows.
 ;;;============================================================
 
-(define (bsf-render-all-sections records currency show-progress? plan-targets included-accounts)
+(define (bsf-render-all-sections records currency show-progress? plan-targets
+                                  included-accounts show-ytd? ytd-data)
   (cond
     ((null? included-accounts)
      (string-append
@@ -1161,21 +1296,29 @@ body {
               included-accounts))
             (gt-bgt (fold + 0.0 (map (lambda (r) (list-ref r 2)) records)))
             (gt-act (fold + 0.0 (map (lambda (r) (list-ref r 3)) records)))
-            (gt-avl (fold + 0.0 (map (lambda (r) (list-ref r 4)) records))))
+            (gt-avl (fold + 0.0 (map (lambda (r) (list-ref r 4)) records)))
+            (gt-ytd (and show-ytd?
+                        (fold + 0.0
+                              (map (lambda (r)
+                                     (list-ref (assq (list-ref r 0) ytd-data) 3))
+                                   records)))))
        (string-append
         (apply string-append
                (map (lambda (sec)
                       (bsf-render-section-card
                        (xaccAccountGetName (car sec))
                        (cdr sec)
-                       currency show-progress? plan-targets #f))
+                       currency show-progress? plan-targets #f
+                       show-ytd? ytd-data))
                     section-data))
         (if (null? fp-records)
             ""
             (bsf-render-section-card
              "Future Purchases" fp-records
-             currency show-progress? plan-targets #t))
-        (bsf-render-grand-total-card gt-bgt gt-act gt-avl currency))))))
+             currency show-progress? plan-targets #t
+             show-ytd? ytd-data))
+        (bsf-render-grand-total-card gt-bgt gt-act gt-avl currency
+                                     show-ytd? gt-ytd))))))
 
 ;;;============================================================
 ;;; HTML: LEGEND
@@ -1283,7 +1426,20 @@ body {
                   ;; Read planning targets from account notes (all leaf records).
                   (note-parsed    (bsf-note-targets-for-records records))
                   (plan-targets   (car note-parsed))
-                  (plan-warnings  (cdr note-parsed)))
+                  (plan-warnings  (cdr note-parsed))
+                  ;; Cumulative-to-date (period 0 through today) figures per
+                  ;; account.  Always computed: Sinking Fund / Future Purchase
+                  ;; "funded so far" must reflect true progress toward the
+                  ;; target regardless of which date range is being viewed —
+                  ;; using the selected-range Available instead would show
+                  ;; e.g. "$0 funded" when browsing a single past/future
+                  ;; month.  Also displayed as a reference "YTD" column
+                  ;; whenever the selected date range is something other
+                  ;; than "Year to date" itself (where it would just repeat
+                  ;; the Available column).
+                  (show-ytd?      (not (eq? date-range-preset 'ytd)))
+                  (ytd-data       (bsf-compute-ytd-data
+                                    budget records liability-payments-only?)))
 
              (string-append
 
@@ -1300,7 +1456,8 @@ body {
               (bsf-render-fp-warnings plan-warnings)
 
               ;; ── Section cards ────────────────────────────────────
-              (bsf-render-all-sections records currency show-progress plan-targets included-accounts)
+              (bsf-render-all-sections records currency show-progress plan-targets
+                                       included-accounts show-ytd? ytd-data)
 
               ;; ── Legend ───────────────────────────────────────────
               (bsf-render-legend)))))))

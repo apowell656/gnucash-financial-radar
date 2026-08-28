@@ -101,6 +101,7 @@ It provides a YNAB / Actual Budget-style view of budget categories using:
 - Carry-forward overspending, including negative available balances
 - First, current, last, or manually selected budget period ranges
 - Single-period or multi-period cumulative views
+- Optional YTD reference column shown whenever the selected date range is something other than Year to date
 - Configurable included accounts (defaults to Assets, Expenses, and Liabilities)
 - Separate section card per included account root, plus a Future Purchases section
 - Category grouping by the first path segment within each section
@@ -132,6 +133,10 @@ The report scans leaf accounts under the accounts selected in `Options → Accou
 
 The rendered output is divided into one card per non-empty included-account root, in the order those roots appear in the option, followed by a `Future Purchases` card (if any Future Purchase accounts exist) and a grand total card. Sinking Fund accounts remain inside their natural section. Future Purchase accounts are extracted from their natural section and shown only in the `Future Purchases` card.
 
+#### YTD reference column
+
+When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through today, independent of whatever narrower or offset range (`This month only`, `Last month only`, a custom range, etc.) is currently selected for the main Budgeted/Activity/Available columns. Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
+
 #### Sinking Fund and Future Purchase planning targets
 
 Add `key=value` lines to any leaf expense account's Notes field in GnuCash to make it a sinking fund planning row:
@@ -141,22 +146,35 @@ target=2600
 target-date=2027-05-13
 ```
 
+For a bill that recurs on a fixed cycle (an annual car registration, a quarterly insurance premium, and so on), add `frequency` so the due date advances itself every cycle instead of needing a manual edit after each payment:
+
+```text
+target=210
+target-date=2026-07-31
+frequency=annual
+```
+
 Supported fields:
 
 | Field | Format | Description |
 |-------|--------|-------------|
 | `target` | positive number | Savings goal or purchase amount |
 | `target-date` | `YYYY-MM-DD` | Optional deadline |
+| `frequency` | `monthly`, `bimonthly`, `quarterly`, `semiannual`, or `annual` (`annually` / `yearly` also accepted) | Optional recurrence cycle. Requires `target-date`, which then acts as a fixed anchor rather than a one-time deadline. |
+
+With `frequency` set, `target-date` is never rewritten by the report. Each render walks the anchor date forward in whole cycles until it reaches the next occurrence on or after today, so a recurring target keeps showing the correct upcoming due date indefinitely with zero manual upkeep. Without `frequency`, `target-date` behaves as a plain one-time deadline, exactly as before.
 
 Lines starting with `#` in account notes are treated as comments and ignored. The report reads these fields but never writes to account notes.
 
 For each Sinking Fund or Future Purchase row with valid planning metadata, the report shows compact planning info below the account name:
 
 - Target amount
-- Remaining amount (`max(0, target - available)`)
-- Percent funded (`available / target`, clamped 0–100%)
-- If a target date is set and the date is in the future: `Month Year — $X/mo needed` (monthly contribution required, based on `remaining` and months until the target date — does not require a nonzero budgeted amount)
-- If the target date is current or past: `Overdue` or `Due now`
+- Remaining amount (`max(0, target - funded)`)
+- Percent funded (`funded / target`, clamped 0–100%)
+- If a target date is set and the (possibly recurrence-advanced) date is in the future: `Month Year — $X/mo needed` (monthly contribution required, based on `remaining` and months until that date — does not require a nonzero budgeted amount)
+- If that date is current or past: `Overdue` or `Due now`
+
+`funded` is the account's cumulative available balance from the first budget period through today — the same figure shown in the YTD column — not the Available value for whatever date range is currently selected. This keeps target progress and required monthly contributions accurate regardless of which range you're browsing: viewing a single past or future month no longer makes a sinking fund look unfunded, and any amount saved ahead of a due date (including funding past 100%) automatically carries forward as a head start once `target-date` rolls to the next cycle.
 
 Accounts with a valid `target=` note appear in the table even if they have no budget or spending activity in the selected period range.
 
@@ -305,7 +323,8 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds uses the selected GnuCash budget and scans leaf accounts under the accounts selected in `Included Accounts`. The default is the book's top-level `Assets`, `Expenses`, and `Liabilities` accounts.
 - Any visible leaf account with a valid `target=` in its account notes is automatically classified as a Sinking Fund. No `Sinking Funds` placeholder account is required.
 - Future Purchase badges require a placeholder account named exactly `Future Purchases` somewhere above the leaf account.
-- Planning targets are set via account notes (`target=`, `target-date=`). The report reads these fields but never writes to account notes.
+- Planning targets are set via account notes (`target=`, `target-date=`, `frequency=`). The report reads these fields but never writes to account notes.
+- `frequency=` makes `target-date` a recurring anchor instead of a one-time deadline: the report computes the next on-or-after-today occurrence at render time and never edits the note itself.
 - Debt assumptions are read from account notes (`apr=`, `min-payment=`, `priority=`). The report reads these fields but never writes to account notes.
 - By default, Budget Report with Sinking Funds calculates Activity for every account (including liabilities and credit cards) as the net of that account's budget actuals — payments and charges offset each other. Enabling `Accounts → Liability activity: payments only` changes Activity for liability and credit-card accounts to count only the gross payments that reduce the balance; charges, interest, fees, and payment reversals are excluded. This option affects liability/credit-card accounts only — Activity for expense, asset, income, and equity accounts is unchanged either way, and net activity remains the default.
 - Upcoming transactions depend on scheduled transaction data in the book.
@@ -319,7 +338,9 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds totals whole GnuCash budget periods only. It does not prorate partial periods or use arbitrary calendar date ranges.
 - Budget Report with Sinking Funds includes only visible leaf accounts under the `Included Accounts` selection. Parent accounts are used for grouping, hidden-account filtering, and `Off Budget` subtree exclusion, not as direct budget rows.
 - Budget Report with Sinking Funds classifies an account as a Sinking Fund when it has a valid `target=` note and is not a Future Purchase. Future Purchases are detected only by the exact placeholder account name `Future Purchases`; there is no option to use a different name.
-- Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, due dates, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
+- Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
+- Sinking Fund / Future Purchase "funded so far" (and the YTD column) is cumulative from the first period of the *currently selected* GnuCash budget through today. If you start a new Budget object each fiscal year rather than continuing periods within one budget, that cumulative total restarts at $0 in the new budget even though real-world savings carried over — there is no cross-budget carryover mechanism.
+- `frequency=` recurrence covers monthly, bimonthly, quarterly, semiannual, and annual cycles anchored to a single `target-date`. It does not support arbitrary custom intervals, multiple due dates per account, or day-of-month precision — occurrences are resolved to a calendar month, not an exact day.
 - Budget Report with Sinking Funds uses absolute values for budget actual totals, so unusual account signs or journal corrections may need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
 - Cash flow follows split signs on the selected cash/asset accounts, similar to GnuCash's built-in Cash Flow report. Selecting income, expense, or liability accounts can produce confusing results.
 - Upcoming Transactions uses scheduled transaction data. Projected Balances uses entered register transactions plus scheduled transaction data. They do not forecast from historical spending patterns.
