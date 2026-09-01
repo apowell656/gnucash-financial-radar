@@ -23,7 +23,8 @@
 ;; Negative balances (overspending) carry forward — nothing is clamped to zero.
 ;;
 ;; Two category types are auto-detected:
-;;   Sinking Fund    — any visible leaf expense account with a valid target= note
+;;   Sinking Fund    — any visible leaf expense account with valid planning
+;;                     target metadata in its Notes field
 ;;                     (unless also classified as a Future Purchase).
 ;;   Future Purchase — any leaf expense account beneath a placeholder account
 ;;                     named exactly "Future Purchases".
@@ -221,7 +222,7 @@
 ;;; reliably bound in all GnuCash builds.
 ;;;
 ;;; Future Purchase → any leaf under a "Future Purchases" placeholder.
-;;; Sinking Fund    → any other visible leaf with a valid target= note.
+;;; Sinking Fund    → any other visible leaf with valid planning target metadata.
 ;;;============================================================
 
 (define (bsf-find-fp-roots root)
@@ -548,12 +549,17 @@
 ;;;============================================================
 ;;; PLANNING TARGET METADATA
 ;;; Planning targets are read from account Notes for every visible
-;;; leaf expense account.  An account with a valid target= becomes a
-;;; sinking fund (or keeps its future-purchase classification).
+;;; leaf expense account.  An account with one or more valid item= lines
+;;; becomes a sinking fund (or keeps its future-purchase classification).
+;;; The legacy target= / target-date= / frequency= fields are still
+;;; supported as a single unnamed item.
 ;;;
-;;; Target alist entry: (display-name amount date-or-#f freq-months-or-#f)
-;;;   amount           — positive number
-;;;   date-or-#f       — (year . month) cons or #f
+;;; Target alist entry:
+;;;   (acct (label amount date-or-#f freq-months-or-#f) ...)
+;;; Target item:
+;;;   label             — item name
+;;;   amount            — positive number
+;;;   date-or-#f        — (year . month) cons or #f
 ;;;   freq-months-or-#f — months per recurrence cycle, or #f for a
 ;;;                       one-off (non-recurring) target
 ;;;============================================================
@@ -573,6 +579,22 @@
        (loop (cdr chars) '() (cons (list->string (reverse cur)) acc)))
       (else
        (loop (cdr chars) (cons (car chars) cur) acc)))))
+
+(define (bsf-fp-split-char text delimiter)
+  (let loop ((chars (string->list text)) (cur '()) (acc '()))
+    (cond
+      ((null? chars)
+       (reverse (cons (list->string (reverse cur)) acc)))
+      ((char=? (car chars) delimiter)
+       (loop (cdr chars) '() (cons (list->string (reverse cur)) acc)))
+      (else
+       (loop (cdr chars) (cons (car chars) cur) acc)))))
+
+(define (bsf-list-ref/default xs n default)
+  (cond
+    ((null? xs) default)
+    ((= n 0)    (car xs))
+    (else       (bsf-list-ref/default (cdr xs) (1- n) default))))
 
 (define (bsf-fp-parse-amount s)
   (let ((n (string->number (bsf-fp-trim s))))
@@ -635,6 +657,10 @@
 ;;; ACCOUNT NOTE PARSING (key=value)
 ;;; Reads planning target metadata stored in GnuCash account
 ;;; notes via xaccAccountGetNotes.  Recognised fields:
+;;;   item=<name> | <amount> | [YYYY-MM or YYYY-MM-DD] | [cycle]
+;;;                              e.g. item=Service | 120 | bimonthly
+;;;                              e.g. item=Service | 120 | | bimonthly
+;;;                              e.g. item=Insurance | 2600 | 2027-05 | annual
 ;;;   target=<amount>           e.g. target=2600
 ;;;   target-date=<YYYY-MM-DD>  e.g. target-date=2027-05-13
 ;;;   frequency=<cycle>         e.g. frequency=annual
@@ -644,6 +670,8 @@
 ;;;     anchor: the report auto-advances it to the next on-or-after-today
 ;;;     occurrence every render, so a recurring bill (e.g. an annual car
 ;;;     registration) never needs its note edited after the first cycle.
+;;; Multiple item= lines may be used on one account. The legacy target=
+;;; fields are ignored when item= lines are present.
 ;;; Applied to all visible leaf expense accounts.
 ;;;============================================================
 
@@ -677,76 +705,117 @@
                 (loop (cdr chars) (cons (car chars) key-acc) #f val-acc)))))))
    (bsf-fp-split-lines text)))
 
-;; Return #t if the account has a syntactically valid target= note value.
+(define (bsf-parse-target-item raw)
+  (let* ((parts  (map bsf-fp-trim (bsf-fp-split-char raw #\|)))
+         (label  (bsf-list-ref/default parts 0 ""))
+         (amount (bsf-fp-parse-amount (bsf-list-ref/default parts 1 "")))
+         (third  (bsf-list-ref/default parts 2 ""))
+         (fourth (bsf-list-ref/default parts 3 ""))
+         (third-date (if (string=? third "") #f (bsf-fp-parse-date third)))
+         (third-freq (if (string=? third "") #f (bsf-fp-parse-frequency third)))
+         (third-is-freq? (and (string=? fourth "") third-freq (not third-date)))
+         (date-s (if third-is-freq? "" third))
+         (freq-s (if third-is-freq? third fourth))
+         (date   (if (string=? date-s "") #f (bsf-fp-parse-date date-s)))
+         (freq   (if (string=? freq-s "") #f (bsf-fp-parse-frequency freq-s))))
+    (if (and (not (string=? label ""))
+             amount
+             (or (string=? date-s "") date)
+             (or (string=? freq-s "") freq))
+        (list label amount date freq)
+        #f)))
+
+;; Return #t if the account has syntactically valid planning target metadata.
 ;; Used to force-include target accounts even when budget activity is zero.
 (define (bsf-has-target-note? acct)
   (let* ((kv   (bsf-parse-note-kv (or (xaccAccountGetNotes acct) "")))
+         (items (filter (lambda (x) (string=? (car x) "item")) kv))
          (t-kv (assoc "target" kv)))
-    (and t-kv (bsf-fp-parse-amount (cdr t-kv)) #t)))
+    (or (any (lambda (x) (and (bsf-parse-target-item (cdr x)) #t)) items)
+        (and (null? items) t-kv (bsf-fp-parse-amount (cdr t-kv)) #t))))
 
 ;; For each visible leaf expense record, read account notes and extract
-;; target / target-date / frequency metadata.  Records without a valid
-;; target= are skipped.
+;; item metadata. Records without a valid item= or legacy target= are skipped.
 ;; Returns (targets . warnings).
-;;   targets  : ((display-name amount date-or-#f freq-months-or-#f) ...)
+;;   targets  : ((acct (label amount date-or-#f freq-months-or-#f) ...) ...)
 ;;   warnings : list of human-readable strings for bad note values.
 (define (bsf-note-targets-for-records records)
-  (let* ((warnings '())
-         (add-warn! (lambda (msg)
-                      (set! warnings (append warnings (list msg)))))
-         (warn-bad-field!
-          (lambda (acct field raw)
-            (add-warn!
-             (string-append
-              "Account &ldquo;"
-              (gnc:html-string-sanitize (xaccAccountGetName acct))
-              "&rdquo;: invalid note &ldquo;" field "&rdquo; value &ldquo;"
-              (gnc:html-string-sanitize raw)
-              "&rdquo;"))))
-         (targets
-          (filter-map
-           (lambda (rec)
-             (let* ((acct  (list-ref rec 0))
-                    (dname (list-ref rec 1))
-                    (kv    (bsf-parse-note-kv
-                            (or (xaccAccountGetNotes acct) "")))
-                    (t-kv  (assoc "target" kv))
-                    (d-kv  (assoc "target-date" kv))
-                    (f-kv  (assoc "frequency" kv)))
-               (if (not t-kv)
-                   #f
-                   (let ((amount (bsf-fp-parse-amount (cdr t-kv))))
-                     (if (not amount)
-                         (begin (warn-bad-field! acct "target" (cdr t-kv)) #f)
-                         (let ((date (if d-kv
-                                        (let ((d (bsf-fp-parse-date (cdr d-kv))))
-                                          (if (not d)
-                                              (begin
-                                                (warn-bad-field!
-                                                 acct "target-date" (cdr d-kv))
-                                                #f)
-                                              d))
-                                        #f)))
-                           (let ((freq (if f-kv
-                                           (let ((fr (bsf-fp-parse-frequency (cdr f-kv))))
-                                             (cond
-                                               ((not fr)
-                                                (warn-bad-field!
-                                                 acct "frequency" (cdr f-kv))
-                                                #f)
-                                               ((not date)
-                                                (add-warn!
-                                                 (string-append
-                                                  "Account &ldquo;"
-                                                  (gnc:html-string-sanitize
-                                                   (xaccAccountGetName acct))
-                                                  "&rdquo;: &ldquo;frequency&rdquo; has no effect without a &ldquo;target-date&rdquo;"))
-                                                #f)
-                                               (else fr)))
-                                           #f)))
-                             (list acct amount date freq))))))))
-           records)))
-    (cons targets warnings)))
+  (let ((warnings '()))
+    (define (add-warn! msg)
+      (set! warnings (append warnings (list msg))))
+    (define (warn-bad-field! acct field raw)
+      (add-warn!
+       (string-append
+        "Account &ldquo;"
+        (gnc:html-string-sanitize (xaccAccountGetName acct))
+        "&rdquo;: invalid note &ldquo;" field "&rdquo; value &ldquo;"
+        (gnc:html-string-sanitize raw)
+        "&rdquo;")))
+    (define (legacy-target acct dname t-kv d-kv f-kv)
+      (if (not t-kv)
+          #f
+          (let ((amount (bsf-fp-parse-amount (cdr t-kv))))
+            (if (not amount)
+                (begin
+                  (warn-bad-field! acct "target" (cdr t-kv))
+                  #f)
+                (let* ((date
+                        (if d-kv
+                            (let ((d (bsf-fp-parse-date (cdr d-kv))))
+                              (if d
+                                  d
+                                  (begin
+                                    (warn-bad-field!
+                                     acct "target-date" (cdr d-kv))
+                                    #f)))
+                            #f))
+                       (freq
+                        (if f-kv
+                            (let ((fr (bsf-fp-parse-frequency (cdr f-kv))))
+                              (cond
+                                ((not fr)
+                                 (warn-bad-field!
+                                  acct "frequency" (cdr f-kv))
+                                 #f)
+                                ((not date)
+                                 (add-warn!
+                                  (string-append
+                                   "Account &ldquo;"
+                                   (gnc:html-string-sanitize
+                                    (xaccAccountGetName acct))
+                                   "&rdquo;: &ldquo;frequency&rdquo; has no effect without a &ldquo;target-date&rdquo;"))
+                                 #f)
+                                (else fr)))
+                            #f)))
+                  (list acct (list dname amount date freq)))))))
+    (let ((targets
+           (filter-map
+            (lambda (rec)
+              (let* ((acct  (list-ref rec 0))
+                     (dname (list-ref rec 1))
+                     (kv    (bsf-parse-note-kv
+                             (or (xaccAccountGetNotes acct) "")))
+                     (item-kvs
+                      (filter (lambda (x) (string=? (car x) "item")) kv))
+                     (t-kv  (assoc "target" kv))
+                     (d-kv  (assoc "target-date" kv))
+                     (f-kv  (assoc "frequency" kv)))
+                (if (not (null? item-kvs))
+                    (let ((items
+                           (filter-map
+                            (lambda (item-kv)
+                              (let ((item (bsf-parse-target-item (cdr item-kv))))
+                                (if item
+                                    item
+                                    (begin
+                                      (warn-bad-field!
+                                       acct "item" (cdr item-kv))
+                                      #f))))
+                            item-kvs)))
+                      (if (null? items) #f (cons acct items)))
+                    (legacy-target acct dname t-kv d-kv f-kv))))
+            records)))
+      (cons targets warnings))))
 
 ;;;============================================================
 ;;; FORMATTING HELPERS
@@ -806,7 +875,8 @@
 ;;; PLANNING METADATA RENDERER
 ;;; Renders compact target/progress info below the category name
 ;;; for Sinking Fund or Future Purchase rows with a target entry.
-;;; target-entry is (display-name amount date-or-#f freq-months-or-#f) or #f.
+;;; target-entry is (acct (label amount date-or-#f freq-months-or-#f) ...)
+;;; or #f.
 ;;; funded is the true cumulative available-to-date (period 0 through
 ;;; today) — NOT the row's selected-date-range Available — since
 ;;; progress toward a savings target must reflect everything set aside
@@ -817,49 +887,85 @@
   (if (not target-entry)
       ""
       (let* ((fmt       (lambda (n) (bsf-fmt-money n currency)))
-             (amount    (cadr   target-entry))
-             (raw-date  (caddr  target-entry))
-             (freq      (cadddr target-entry))
-             ;; A recurring target's date is a fixed anchor: roll it forward
-             ;; to the next on-or-after-today occurrence so the note never
-             ;; needs manual upkeep after each cycle's bill is paid.
-             (date      (if (and raw-date freq)
-                            (bsf-fp-next-occurrence (car raw-date) (cdr raw-date) freq)
-                            raw-date))
+             (items     (cdr target-entry))
+             (amount    (fold + 0.0 (map cadr items)))
              (remaining (max 0.0 (- amount funded)))
              (pct-raw   (if (> amount 0.001)
                             (* 100.0 (/ funded amount))
                             0.0))
              (pct       (inexact->exact (round (min 100.0 (max 0.0 pct-raw)))))
-             (date-info (if date
-                            (let* ((mo (bsf-fp-months-remaining
-                                        (car date) (cdr date)))
-                                   (mn (vector-ref bsf-month-names
-                                                   (1- (cdr date))))
-                                   (yr (number->string (car date)))
-                                   (lbl (string-append mn " " yr)))
-                              (cond
-                                ((<= mo 0)
-                                 (if (> remaining 0.001)
-                                     (string-append
-                                      "<span class='fp-pi fp-overdue'>"
-                                      lbl " &mdash; Overdue</span>")
-                                     (string-append
-                                      "<span class='fp-pi fp-due-now'>"
-                                      lbl " &mdash; Due now</span>")))
-                                (else
-                                 (string-append
-                                  "<span class='fp-pi'>"
-                                  lbl " &mdash; "
-                                  (fmt (/ remaining mo))
-                                  "/mo needed</span>"))))
-                            "")))
+             (item-monthly
+              (lambda (item)
+                (let* ((item-amt (list-ref item 1))
+                       (raw-date (list-ref item 2))
+                       (freq     (list-ref item 3))
+                       (date     (if (and raw-date freq)
+                                     (bsf-fp-next-occurrence
+                                      (car raw-date) (cdr raw-date) freq)
+                                     raw-date)))
+                  (cond
+                    (freq (/ item-amt freq))
+                    (date
+                     (let ((mo (bsf-fp-months-remaining
+                                (car date) (cdr date))))
+                       (if (> mo 0) (/ item-amt mo) item-amt)))
+                    (else item-amt)))))
+             (item-info
+              (if (> (length items) 1)
+                  (string-append
+                   "<span class='fp-pi'>Multiple: "
+                   (fmt (fold + 0.0 (map item-monthly items)))
+                   "/mo</span>")
+                  (let* ((item     (car items))
+                         (label    (list-ref item 0))
+                         (item-amt (list-ref item 1))
+                         (raw-date (list-ref item 2))
+                         (freq     (list-ref item 3))
+                         ;; A recurring target's date is a fixed anchor:
+                         ;; roll it forward without rewriting the note.
+                         (date     (if (and raw-date freq)
+                                       (bsf-fp-next-occurrence
+                                        (car raw-date) (cdr raw-date) freq)
+                                       raw-date)))
+                    (if date
+                        (let* ((mo (bsf-fp-months-remaining
+                                    (car date) (cdr date)))
+                               (mn (vector-ref bsf-month-names
+                                               (1- (cdr date))))
+                               (yr (number->string (car date)))
+                               (lbl (string-append mn " " yr)))
+                          (cond
+                            ((<= mo 0)
+                             (string-append
+                              "<span class='fp-pi fp-due-now'>"
+                              (gnc:html-string-sanitize label)
+                              " &mdash; " lbl " due</span>"))
+                            (freq
+                             (string-append
+                              "<span class='fp-pi'>"
+                              (gnc:html-string-sanitize label)
+                              " " (fmt (/ item-amt freq))
+                              "/mo, due " lbl "</span>"))
+                            (else
+                             (string-append
+                              "<span class='fp-pi'>"
+                              (gnc:html-string-sanitize label)
+                              " " (fmt (/ item-amt mo))
+                              "/mo until " lbl "</span>"))))
+                        (string-append
+                         "<span class='fp-pi'>"
+                         (gnc:html-string-sanitize label)
+                         " "
+                         (if freq
+                             (string-append (fmt (/ item-amt freq)) "/mo")
+                             (fmt item-amt))
+                         "</span>"))))))
         (string-append
          "<div class='fp-plan'>"
          "<span class='fp-pi'>Target " (fmt amount) "</span>"
          "<span class='fp-pi'>Remaining " (fmt remaining) "</span>"
          "<span class='fp-pi'>" (number->string pct) "% funded</span>"
-         date-info
+         item-info
          "</div>"))))
 
 ;;;============================================================
@@ -1085,7 +1191,7 @@ body {
 ;;; One row per leaf expense account.
 ;;;============================================================
 
-;; fp-target: entry from the target alist — (display-name amount date-or-#f) or #f.
+;; fp-target: entry from the target alist — (acct item...) or #f.
 ;; ytd-entry: (acct ytd-bgt ytd-act ytd-avl) from bsf-compute-ytd-data — always
 ;; present (bsf-renderer computes ytd-data unconditionally) since Sinking Fund /
 ;; Future Purchase "funded so far" must reflect true cumulative progress, not
@@ -1132,7 +1238,7 @@ body {
 ;;; names so the section title is not repeated as a group header.
 ;;;============================================================
 
-;; plan-targets: alist of (acct amount date-or-#f) entries keyed by account object.
+;; plan-targets: alist of (acct item...) entries keyed by account object.
 ;; ytd-data: alist of (acct . (ytd-bgt ytd-act ytd-avl)) from bsf-compute-ytd-data.
 ;; Always populated (used for Sinking Fund/Future Purchase funded-so-far math
 ;; even when show-ytd? is false and the reference column itself is hidden).
