@@ -334,6 +334,8 @@
 ;;; inclusive, 0-based).  Setting start-period=0 gives full carry-
 ;;; forward from the beginning of the budget (YNAB style).  Setting
 ;;; start-period=end-period gives a single-period snapshot.
+;;; Activity uses each period's absolute actual value before summing,
+;;; so opposite signs in different periods cannot cancel each other out.
 ;;; Available = Budgeted - Actual.  Negatives are preserved.
 ;;;============================================================
 
@@ -344,10 +346,11 @@
                 (iota (- (1+ end-period) start-period) start-period))))
 
 (define (bsf-cumulative-actual budget acct start-period end-period)
-  (abs (apply + (map (lambda (p)
-                       (gnc-numeric-to-double
-                        (gnc-budget-get-account-period-actual-value budget acct p)))
-                     (iota (- (1+ end-period) start-period) start-period)))))
+  (apply + (map (lambda (p)
+                  (abs
+                   (gnc-numeric-to-double
+                    (gnc-budget-get-account-period-actual-value budget acct p))))
+                (iota (- (1+ end-period) start-period) start-period))))
 
 ;;;============================================================
 ;;; LIABILITY PAYMENT-ONLY ACTIVITY (optional)
