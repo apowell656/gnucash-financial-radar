@@ -135,7 +135,7 @@ The rendered output is divided into one card per non-empty included-account root
 
 #### YTD reference column
 
-When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through today, independent of whatever narrower or offset range (`This month only`, `Last month only`, a custom range, etc.) is currently selected for the main Budgeted/Activity/Available columns. Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
+When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through the selected ending period, including the prior periods before a narrower or offset range (`This month only`, `Last month only`, a custom range, etc.) is currently selected for the main Budgeted/Activity/Available columns. Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
 
 #### Sinking Fund and Future Purchase planning targets
 
@@ -189,7 +189,20 @@ Supported multi-item format:
 
 Valid frequencies are `monthly`, `bimonthly`, `quarterly`, `semiannual`, and `annual`. `annually` and `yearly` are also accepted for annual targets.
 
-With `frequency` set, `target-date` is never rewritten by the report. Each render walks the anchor date forward in whole cycles until it reaches the next occurrence on or after today, so a recurring target keeps showing the correct upcoming due date indefinitely with zero manual upkeep. Without `frequency`, `target-date` behaves as a plain one-time deadline, exactly as before.
+With `frequency` set, `target-date` is a fixed anchor and is never rewritten.
+The report displays the first unpaid occurrence. To associate a payment reliably,
+set its **expense split memo** to exactly `[bsf:ITEM LABEL:YYYY-MM]`, using the
+configured item label and scheduled due month (even for early or late payments).
+For a legacy target, use the displayed account path, such as
+`[bsf:Subscriptions:Microsoft 365 Family:2026-10]` when that is the row's display path.
+Non-voided signed splits through the selected period end are summed per occurrence;
+refunds reverse payment evidence. Payment totals must meet the target at the
+account commodity's precision. Partial payments and unmarked expenses do not
+advance the date. Unmarked expenses still count normally in Activity.
+This optional marker is necessary because account membership and amounts alone
+cannot identify payments reliably. Existing Notes remain compatible, but unmarked
+historical payments cannot automatically satisfy anchored occurrences.
+Undated items retain their funding recommendation without payment-driven dates.
 
 If an account has one or more `item=` lines, the report uses those items and ignores any legacy `target=`, `target-date=`, or `frequency=` lines on the same account.
 
@@ -205,7 +218,7 @@ For each Sinking Fund or Future Purchase row with valid planning metadata, the r
 - If a one-time target date is set and the date is in the future: `Month Year - $X/mo needed` (monthly contribution required, based on `remaining` and months until that date; does not require a nonzero budgeted amount)
 - If that date is current or past: `Overdue` or `Due now`
 
-`funded` is the account's cumulative available balance from the first budget period through today - the same figure shown in the YTD column - not the Available value for whatever date range is currently selected. This keeps target progress and required monthly contributions accurate regardless of which range you're browsing: viewing a single past or future month no longer makes a sinking fund look unfunded, and any amount saved ahead of a due date (including funding past 100%) automatically carries forward as a head start once `target-date` rolls to the next cycle.
+`funded` is the account's cumulative available balance from the first budget period through the selected ending period - the same figure shown in the YTD column - not the Available value for whatever date range is currently selected. This keeps target progress and required monthly contributions accurate regardless of which range you're browsing: viewing a single month includes prior allocations and activity through that month, and any amount saved ahead of a due date (including funding past 100%) automatically carries forward as a head start once `target-date` rolls to the next cycle.
 
 Accounts with valid planning metadata appear in the table even if they have no budget or spending activity in the selected period range.
 
@@ -355,7 +368,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Any visible leaf account with valid planning metadata in its account notes is automatically classified as a Sinking Fund. No `Sinking Funds` placeholder account is required.
 - Future Purchase badges require a placeholder account named exactly `Future Purchases` somewhere above the leaf account.
 - Planning targets are set via account notes (`item=`, or legacy `target=`, `target-date=`, `frequency=`). The report reads these fields but never writes to account notes.
-- `frequency=` makes `target-date` a recurring anchor instead of a one-time deadline: the report computes the next on-or-after-today occurrence at render time and never edits the note itself.
+- `frequency=` makes `target-date` a recurring anchor instead of a one-time deadline: the report computes the first unpaid occurrence using marked expense splits through the reporting period end and never edits the note itself.
 - Debt assumptions are read from account notes (`apr=`, `min-payment=`, `priority=`). The report reads these fields but never writes to account notes.
 - By default, Budget Report with Sinking Funds calculates Activity for every account (including liabilities and credit cards) as the net of that account's budget actuals. Payments and charges offset each other. Enabling `Accounts → Liability activity: payments only` changes Activity for liability and credit-card accounts to count only the gross payments that reduce the balance; charges, interest, fees, and payment reversals are excluded. This option affects liability/credit-card accounts only. Activity for expense, asset, income, and equity accounts is unchanged either way, and net activity remains the default.
 - Upcoming transactions depend on scheduled transaction data in the book.
@@ -370,7 +383,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds includes only visible leaf accounts under the `Included Accounts` selection. Parent accounts are used for grouping, hidden-account filtering, and `Off Budget` subtree exclusion, not as direct budget rows.
 - Budget Report with Sinking Funds classifies an account as a Sinking Fund when it has valid planning metadata and is not a Future Purchase. Future Purchases are detected only by the exact placeholder account name `Future Purchases`; there is no option to use a different name.
 - Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
-- Sinking Fund / Future Purchase "funded so far" (and the YTD column) is cumulative from the first period of the *currently selected* GnuCash budget through today. If you start a new Budget object each fiscal year rather than continuing periods within one budget, that cumulative total restarts at $0 in the new budget even though real-world savings carried over. There is no cross-budget carryover mechanism.
+- Sinking Fund / Future Purchase "funded so far" (and the YTD column) is cumulative from the first period of the *currently selected* GnuCash budget through the selected ending period. If you start a new Budget object each fiscal year rather than continuing periods within one budget, that cumulative total restarts at $0 in the new budget even though real-world savings carried over. There is no cross-budget carryover mechanism.
 - `frequency=` recurrence covers monthly, bimonthly, quarterly, semiannual, and annual cycles anchored to a single `target-date`. It does not support arbitrary custom intervals or day-of-month precision. Occurrences are resolved to a calendar month, not an exact day. Multiple `item=` lines per account are supported, but multiple items are summarized as one combined monthly amount in the row.
 - Budget Report with Sinking Funds sums each period's absolute budget actual value, so opposite signs in different periods do not cancel each other out. Unusual account signs or journal corrections may still need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
 - Cash flow follows split signs on the selected cash/asset accounts, similar to GnuCash's built-in Cash Flow report. Selecting income, expense, or liability accounts can produce confusing results.
@@ -385,3 +398,14 @@ Budget Report with Sinking Funds options are grouped by:
 
 This project is free software released under the GNU General Public License,
 version 2 or later. See [COPYING](COPYING) for the full license text.
+
+#### Sinking fund Available in monthly views
+
+Sinking fund **Available** includes allocations and activity from the first period
+of the selected budget through the selected ending period. **Budgeted** and
+**Activity** still reflect the selected range. Group, section, and grand totals
+sum those displayed Available balances, so they may differ from selected-range
+Budgeted minus Activity. The legend explains this distinction. Ordinary categories
+and Future Purchases retain their existing selected-range Available behavior.
+A real cumulative funding shortfall still appears negative. Carryover across
+separate Budget objects is not modeled.

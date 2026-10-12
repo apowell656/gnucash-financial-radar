@@ -409,13 +409,13 @@
 ;;; When the user has chosen a date-range preset other than "Year to
 ;;; date", the main Budgeted/Activity/Available columns reflect that
 ;;; narrower range.  This computes a separate cumulative Jan 1-through-
-;;; today figure per account so the report can also show a "YTD"
+;;; selected-end-period figure per account so the report can also show a "YTD"
 ;;; reference column alongside the selected-range figures.
 ;;;============================================================
 
 ;; Returns an alist keyed by account: (acct . (ytd-bgt ytd-act ytd-avl))
-(define (bsf-compute-ytd-data budget records liability-payments-only?)
-  (let ((current-period (bsf-period-for-today budget)))
+(define (bsf-compute-ytd-data budget records liability-payments-only? end-period)
+  (let ((current-period end-period))
     (map (lambda (rec)
            (let* ((acct (list-ref rec 0))
                   (bgt  (bsf-cumulative-budgeted budget acct 0 current-period))
@@ -423,6 +423,21 @@
                                            liability-payments-only?)))
              (cons acct (list bgt act (- bgt act)))))
          records)))
+
+;; Sinking funds retain prior savings when browsing a narrower period range.
+;; Transform records before rendering so row, group and grand totals agree.
+;; Budgeted and Activity remain the selected-period amounts.
+(define (bsf-include-sinking-carryover records targets cumulative-data)
+  (map
+   (lambda (rec)
+     (let ((entry (assq (car rec) cumulative-data)))
+       (if (and entry
+                (eq? (bsf-category-type rec (assq (car rec) targets)) 'sinking-fund))
+           (list (list-ref rec 0) (list-ref rec 1)
+                 (list-ref rec 2) (list-ref rec 3)
+                 (list-ref entry 3) (list-ref rec 5))
+           rec)))
+   records))
 
 ;;;============================================================
 ;;; DATA COLLECTION
@@ -617,9 +632,9 @@
               #f))
         #f)))
 
-(define (bsf-fp-months-remaining year month)
+(define (bsf-fp-months-remaining year month effective-date)
   ;; Signed count: positive = months until target, negative = past.
-  (let* ((now (localtime (current-time)))
+  (let* ((now (localtime effective-date))
          (ny  (+ 1900 (tm:year now)))
          (nm  (+ 1 (tm:mon now))))
     (- (+ (* year 12) month)
@@ -638,23 +653,51 @@
            (string=? t "yearly"))                         12)
       (else #f))))
 
-;; A recurring target's target-date is a fixed anchor, not a deadline that
-;; needs manual upkeep: given that anchor and the cycle length in months,
-;; this returns the (year . month) of the next occurrence on or after the
-;; current month, advancing the anchor forward in whole cycles as needed.
-;; Once a cycle's due date passes, the very next render already points at
-;; the following cycle — the account's Notes field is never rewritten.
-(define (bsf-fp-next-occurrence anchor-year anchor-month freq-months)
-  (let* ((now        (localtime (current-time)))
-         (cur-abs    (+ (* (+ 1900 (tm:year now)) 12) (tm:mon now)))
-         (anchor-abs (+ (* anchor-year 12) (1- anchor-month)))
-         (diff       (- cur-abs anchor-abs))
-         (next-abs   (if (<= diff 0)
-                         anchor-abs
-                         (+ anchor-abs
-                            (* freq-months
-                               (ceiling (/ diff freq-months)))))))
-    (cons (quotient next-abs 12) (1+ (remainder next-abs 12)))))
+;; Payment evidence belongs to a specific occurrence in the expense split memo.
+;; No expense is inferred to be a payment from its date or amount alone.
+(define (bsf-occurrence-marker label date)
+  (string-append "[bsf:" label ":" (number->string (car date)) "-"
+                 (if (< (cdr date) 10) "0" "")
+                 (number->string (cdr date)) "]"))
+
+(define (bsf-occurrence-paid acct label date cutoff amount)
+  (let* ((marker (bsf-occurrence-marker label date))
+         (fraction (gnc-commodity-get-fraction (xaccAccountGetCommodity acct)))
+         (paid
+          (fold
+           (lambda (split total)
+             (let ((trans (xaccSplitGetParent split)))
+               (if (and trans (not (xaccTransGetVoidStatus trans))
+                        (<= (xaccTransGetDate trans) cutoff)
+                        ;; Exact trimmed marker: one split cannot pay two items.
+                        (string=? (bsf-fp-trim (or (xaccSplitGetMemo split) "")) marker))
+                   (+ total (gnc-numeric-to-double (xaccSplitGetAmount split)))
+                   total)))
+           0.0 (xaccAccountGetSplitList acct))))
+    (and (> (round (* amount fraction)) 0)
+         (>= (round (* paid fraction)) (round (* amount fraction))))))
+
+(define (bsf-resolve-obligations targets cutoff)
+  (map
+   (lambda (entry)
+     (cons
+      (car entry)
+      (map
+       (lambda (item)
+         (let ((label (list-ref item 0)) (amount (list-ref item 1))
+               (anchor (list-ref item 2)) (freq (list-ref item 3)))
+           (if (and anchor freq
+                    ;; Duplicate labels cannot identify an individual item.
+                    (= 1 (count (lambda (other) (string=? label (car other)))
+                                (cdr entry))))
+               (let loop ((date anchor))
+                 (if (bsf-occurrence-paid (car entry) label date cutoff amount)
+                     (let ((next (+ (* (car date) 12) (1- (cdr date)) freq)))
+                       (loop (cons (quotient next 12) (1+ (remainder next 12)))))
+                     (list label amount date freq)))
+               item)))
+       (cdr entry))))
+   targets))
 
 ;;;============================================================
 ;;; ACCOUNT NOTE PARSING (key=value)
@@ -670,9 +713,8 @@
 ;;;     One of: monthly, bimonthly, quarterly, semiannual, annual
 ;;;     (annually / yearly also accepted for annual).  Optional — only
 ;;;     meaningful together with target-date, which then becomes a fixed
-;;;     anchor: the report auto-advances it to the next on-or-after-today
-;;;     occurrence every render, so a recurring bill (e.g. an annual car
-;;;     registration) never needs its note edited after the first cycle.
+;;;     anchor: marked expense splits satisfy individual occurrences; the
+;;;     report resolves the first unpaid occurrence without editing Notes.
 ;;; Multiple item= lines may be used on one account. The legacy target=
 ;;; fields are ignored when item= lines are present.
 ;;; Applied to all visible leaf expense accounts.
@@ -881,7 +923,7 @@
 ;;; target-entry is (acct (label amount date-or-#f freq-months-or-#f) ...)
 ;;; or #f.
 ;;; funded is the true cumulative available-to-date (period 0 through
-;;; today) — NOT the row's selected-date-range Available — since
+;;; the selected ending period) — NOT the row's selected-date-range Available — since
 ;;; progress toward a savings target must reflect everything set aside
 ;;; so far, regardless of which period range is currently on screen.
 ;;;============================================================
@@ -902,15 +944,12 @@
                 (let* ((item-amt (list-ref item 1))
                        (raw-date (list-ref item 2))
                        (freq     (list-ref item 3))
-                       (date     (if (and raw-date freq)
-                                     (bsf-fp-next-occurrence
-                                      (car raw-date) (cdr raw-date) freq)
-                                     raw-date)))
+                       (date raw-date))
                   (cond
                     (freq (/ item-amt freq))
                     (date
                      (let ((mo (bsf-fp-months-remaining
-                                (car date) (cdr date))))
+                                (car date) (cdr date) (list-ref item 4))))
                        (if (> mo 0) (/ item-amt mo) item-amt)))
                     (else item-amt)))))
              (item-info
@@ -925,14 +964,11 @@
                          (raw-date (list-ref item 2))
                          (freq     (list-ref item 3))
                          ;; A recurring target's date is a fixed anchor:
-                         ;; roll it forward without rewriting the note.
-                         (date     (if (and raw-date freq)
-                                       (bsf-fp-next-occurrence
-                                        (car raw-date) (cdr raw-date) freq)
-                                       raw-date)))
+                         ;; already resolved from payment evidence without rewriting Notes.
+                         (date raw-date))
                     (if date
                         (let* ((mo (bsf-fp-months-remaining
-                                    (car date) (cdr date)))
+                                    (car date) (cdr date) (list-ref item 4)))
                                (mn (vector-ref bsf-month-names
                                                (1- (cdr date))))
                                (yr (number->string (car date)))
@@ -1440,6 +1476,7 @@ body {
 
    "<div class='legend-section'>"
    "<span class='legend-title'>Available</span>"
+   "<span>Sinking funds include prior savings through the selected period; other categories use the selected range.</span>"
    "<span class='avl-green'>&#9679; Healthy</span>"
    "<span class='avl-yellow'>&#9679; &lt;10% remaining</span>"
    "<span class='avl-red'>&#9679; Overspent</span>"
@@ -1534,21 +1571,21 @@ body {
                                                   liability-payments-only?))
                   ;; Read planning targets from account notes (all leaf records).
                   (note-parsed    (bsf-note-targets-for-records records))
-                  (plan-targets   (car note-parsed))
+                  (effective-date (gnc-budget-get-period-end-date budget end-period))
+                  (plan-targets
+                   (map (lambda (entry)
+                          (cons (car entry)
+                                (map (lambda (item) (append item (list effective-date)))
+                                     (cdr entry))))
+                        (bsf-resolve-obligations (car note-parsed) effective-date)))
                   (plan-warnings  (cdr note-parsed))
-                  ;; Cumulative-to-date (period 0 through today) figures per
-                  ;; account.  Always computed: Sinking Fund / Future Purchase
-                  ;; "funded so far" must reflect true progress toward the
-                  ;; target regardless of which date range is being viewed —
-                  ;; using the selected-range Available instead would show
-                  ;; e.g. "$0 funded" when browsing a single past/future
-                  ;; month.  Also displayed as a reference "YTD" column
-                  ;; whenever the selected date range is something other
-                  ;; than "Year to date" itself (where it would just repeat
-                  ;; the Available column).
+                  ;; Progress and reference totals stop at the selected end period.
+                  ;; Future transactions cannot change a historical report.
                   (show-ytd?      (not (eq? date-range-preset 'ytd)))
                   (ytd-data       (bsf-compute-ytd-data
-                                    budget records liability-payments-only?)))
+                                    budget records liability-payments-only? end-period))
+                  (display-records
+                   (bsf-include-sinking-carryover records plan-targets ytd-data)))
 
              (string-append
 
@@ -1565,7 +1602,7 @@ body {
               (bsf-render-fp-warnings plan-warnings)
 
               ;; ── Section cards ────────────────────────────────────
-              (bsf-render-all-sections records currency show-progress plan-targets
+              (bsf-render-all-sections display-records currency show-progress plan-targets
                                        included-accounts show-ytd? ytd-data)
 
               ;; ── Legend ───────────────────────────────────────────
