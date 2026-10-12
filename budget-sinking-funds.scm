@@ -72,7 +72,8 @@
 (define bsf-opt-period-end          (N_ "Custom: through period"))
 (define bsf-opt-period-exact        (N_ "Custom: exact end period"))
 (define bsf-opt-included-accounts   (N_ "Included Accounts"))
-(define bsf-opt-show-zeros          (N_ "Show zero-balance categories"))
+(define bsf-opt-show-zeros          (N_ "Show all categories, including unused"))
+(define bsf-opt-show-earlier-activity (N_ "Show categories with earlier activity"))
 (define bsf-opt-exclude-off-budget  (N_ "Exclude Off Budget accounts"))
 (define bsf-opt-hidden-accounts     (N_ "Hidden Accounts"))
 (define bsf-opt-liability-payments-only (N_ "Liability activity: payments only"))
@@ -161,8 +162,13 @@
     ;; ── Accounts ─────────────────────────────────────────────────────
     (gnc-register-simple-boolean-option options
       bsf-tab-accounts bsf-opt-show-zeros "a"
-      (N_ "Include categories with no budget and no activity in this period range.")
+      (N_ "Also include categories with no selected-range budget, no planning target, and no activity, regardless of the earlier-activity visibility option.")
       #f)
+
+    (gnc-register-simple-boolean-option options
+      bsf-tab-accounts bsf-opt-show-earlier-activity "a1"
+      (N_ "Keep categories visible when they have recorded activity from the budget start through the selected ending period, even if the selected range has no activity. Refunds and activity that nets to zero also qualify.")
+      #t)
 
     (let* ((book-root    (gnc-get-current-root-account))
            (top-accounts (gnc-account-get-children book-root))
@@ -465,7 +471,22 @@
                 (substring full plen)
                 (loop (cdr roots))))))))
 
-(define (bsf-collect-data budget start-period end-period show-zeros?
+;; Visibility uses individual posted splits, rather than net budget actuals:
+;; spending and refunds can cancel to zero and still constitute activity.
+(define (bsf-has-budget-year-activity? budget acct end-period)
+  (let ((start (gnc-budget-get-period-start-date budget 0))
+        (end (gnc-budget-get-period-end-date budget end-period)))
+    (any
+     (lambda (split)
+       (let ((trans (xaccSplitGetParent split)))
+         (and trans
+              (not (xaccTransGetVoidStatus trans))
+              (>= (xaccTransGetDate trans) start)
+              (<= (xaccTransGetDate trans) end)
+              (not (zero? (gnc-numeric-to-double (xaccSplitGetAmount split)))))))
+     (xaccAccountGetSplitList acct))))
+
+(define (bsf-collect-data budget start-period end-period show-zeros? show-earlier-activity?
                           exclude-off-budget? hidden-accounts included-accounts
                           liability-payments-only?)
   (let* ((root     (gnc-get-current-root-account))
@@ -495,7 +516,9 @@
                     (avl (- bgt act)))
                (if (or show-zeros?
                        (> (+ (abs bgt) (abs act)) 0.001)
-                       (bsf-has-target-note? acct))
+                       (bsf-has-target-note? acct)
+                       (and show-earlier-activity?
+                            (bsf-has-budget-year-activity? budget acct end-period)))
                    (list acct
                          (bsf-display-name acct included-accounts)
                          bgt act avl
@@ -1430,7 +1453,7 @@ body {
       "<div class='card'><div class='empty'>"
       "No budget activity found for this period.<br>"
       "Select a budget in <em>Options &rarr; General</em> or enable "
-      "<em>Show zero-balance categories</em>."
+      "<em>Show all categories, including unused</em>."
       "</div></div>"))
     (else
      (let* ((fp-records     (filter (lambda (r) (list-ref r 5)) records))
@@ -1527,6 +1550,8 @@ body {
          (period-end-type    (or (gnc-optiondb-lookup-value options bsf-tab-general bsf-opt-period-end) 'current))
          (period-end-exact   (or (gnc-optiondb-lookup-value options bsf-tab-general bsf-opt-period-exact) 1))
          (show-zeros?        (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-show-zeros))))
+         (show-earlier-activity?
+          (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-show-earlier-activity))))
          (included-accounts  (or (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-included-accounts) '()))
          (exclude-off-budget? (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-exclude-off-budget))))
          (hidden-accounts    (or (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-hidden-accounts) '()))
@@ -1570,7 +1595,7 @@ body {
                   (start-period (car period-range))
                   (end-period   (cdr period-range))
                   (period-lbl  (bsf-period-label budget start-period end-period))
-                  (records     (bsf-collect-data budget start-period end-period show-zeros?
+                  (records     (bsf-collect-data budget start-period end-period show-zeros? show-earlier-activity?
                                                   exclude-off-budget? hidden-accounts included-accounts
                                                   liability-payments-only?))
                   ;; Read planning targets from account notes (all leaf records).

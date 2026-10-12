@@ -106,7 +106,7 @@ It provides a YNAB / Actual Budget-style view of budget categories using:
 - Separate section card per included account root, plus a Future Purchases section
 - Category grouping by the first path segment within each section
 - Section subtotals and a grand total
-- Optional zero-balance categories
+- Optional display of all categories, including unused ones
 - Optional hidden-account filtering
 - Automatic exclusion of `Off Budget` account trees
 - Optional compact spending progress bars
@@ -118,14 +118,14 @@ Available is calculated as:
 Available = Budgeted to date - Activity to date
 ```
 
-For expense accounts, activity is spending. For asset or liability accounts, activity is the net change recorded in the GnuCash budget actual values. Available does not reflect the account's real-world balance.
+Expense Activity is signed net spending, so refunds reduce it. Other account types use the sum of absolute per-period budget actuals by default. Available does not reflect the account's real-world balance. Budgeted and Activity use the selected range; sinking fund Available includes prior periods from the selected budget's start through the selected ending period.
 
 Two category types are detected automatically:
 
 - **Sinking Fund**: any visible leaf account with valid planning metadata in its account notes (unless it is also a Future Purchase account).
 - **Future Purchase**: any leaf account beneath a placeholder account named exactly `Future Purchases`.
 
-No `Sinking Funds` placeholder account is required. Both category types participate in the budget table with the same budgeted, activity, and available calculations as normal categories.
+No `Sinking Funds` placeholder account is required. Both category types use the same selected-range Budgeted and Activity calculations as normal categories. Sinking fund Available includes prior savings; Future Purchase Available uses the selected range.
 
 #### Included accounts and section layout
 
@@ -135,7 +135,7 @@ The rendered output is divided into one card per non-empty included-account root
 
 #### YTD reference column
 
-When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through the selected ending period, including the prior periods before a narrower or offset range (`This month only`, `Last month only`, a custom range, etc.) is currently selected for the main Budgeted/Activity/Available columns. Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
+When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through the selected ending period, including periods before the selected range (`This month only`, `Last month only`, a custom range, etc.). Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
 
 #### Sinking Fund and Future Purchase planning targets
 
@@ -148,7 +148,7 @@ target=2600
 target-date=2027-05-13
 ```
 
-For a bill that recurs on a fixed cycle, add `frequency` so the due date advances itself every cycle instead of needing a manual edit after each payment:
+For a bill that recurs on a fixed cycle, add `frequency` to define the recurring schedule. Associated payments advance the due date without editing Notes:
 
 ```text
 target=210
@@ -357,7 +357,7 @@ Debt Repayment Planner options are grouped by:
 Budget Report with Sinking Funds options are grouped by:
 
 - General: budget selection, date range, period pickers
-- Accounts: show zero-balance categories, included accounts, exclude off-budget, hidden accounts, liability activity: payments only
+- Accounts: show all categories, including unused (default off); show categories with earlier activity (default on); included accounts; exclude off-budget; hidden accounts; liability activity: payments only
 - Display: spending progress bars
 
 ## Notes
@@ -370,7 +370,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Planning targets are set via account notes (`item=`, or legacy `target=`, `target-date=`, `frequency=`). The report reads these fields but never writes to account notes.
 - `frequency=` makes `target-date` a recurring anchor instead of a one-time deadline: the report computes the first unpaid occurrence using marked expense splits through the reporting period end and never edits the note itself.
 - Debt assumptions are read from account notes (`apr=`, `min-payment=`, `priority=`). The report reads these fields but never writes to account notes.
-- By default, Budget Report with Sinking Funds calculates Activity for every account (including liabilities and credit cards) as the net of that account's budget actuals. Payments and charges offset each other. Enabling `Accounts → Liability activity: payments only` changes Activity for liability and credit-card accounts to count only the gross payments that reduce the balance; charges, interest, fees, and payment reversals are excluded. This option affects liability/credit-card accounts only. Activity for expense, asset, income, and equity accounts is unchanged either way, and net activity remains the default.
+- By default, Budget Report with Sinking Funds sums signed budget actuals for expense accounts and absolute per-period net actuals for other account types. Liability payments and charges offset within each period, but opposite signs across periods do not cancel. Enabling `Accounts → Liability activity: payments only` changes Activity for liability and credit-card accounts to count only the gross payments that reduce the balance; charges, interest, fees, and payment reversals are excluded. This option affects liability/credit-card accounts only. Activity for expense, asset, income, and equity accounts is unchanged either way, and per-period net budget actuals remain the default.
 - Upcoming transactions depend on scheduled transaction data in the book.
 - Projected balances estimate today, midpoint, and end-of-range balances from selected accounts using entered register transactions plus scheduled transaction cash flow, using the Upcoming Transactions look-ahead period.
 
@@ -382,7 +382,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds totals whole GnuCash budget periods only. It does not prorate partial periods or use arbitrary calendar date ranges.
 - Budget Report with Sinking Funds includes only visible leaf accounts under the `Included Accounts` selection. Parent accounts are used for grouping, hidden-account filtering, and `Off Budget` subtree exclusion, not as direct budget rows.
 - Budget Report with Sinking Funds classifies an account as a Sinking Fund when it has valid planning metadata and is not a Future Purchase. Future Purchases are detected only by the exact placeholder account name `Future Purchases`; there is no option to use a different name.
-- Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
+- Budget Report with Sinking Funds calculates Available as budgeted minus activity. Sinking funds use all periods from the selected budget start through the selected ending period; other categories use the selected range. It does not model cash envelopes, account transfers, goals, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
 - Sinking Fund / Future Purchase "funded so far" (and the YTD column) is cumulative from the first period of the *currently selected* GnuCash budget through the selected ending period. If you start a new Budget object each fiscal year rather than continuing periods within one budget, that cumulative total restarts at $0 in the new budget even though real-world savings carried over. There is no cross-budget carryover mechanism.
 - `frequency=` recurrence covers monthly, bimonthly, quarterly, semiannual, and annual cycles anchored to a single `target-date`. It does not support arbitrary custom intervals or day-of-month precision. Occurrences are resolved to a calendar month, not an exact day. Multiple `item=` lines per account are supported, but multiple items are summarized as one combined monthly amount in the row.
 - Budget Report with Sinking Funds sums signed expense actuals, so refunds and rebates offset spending across periods. Other account types retain absolute per-period actuals. Unusual account signs or journal corrections may still need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
@@ -393,11 +393,6 @@ Budget Report with Sinking Funds options are grouped by:
 - Debt payoff estimates use a simplified monthly model: APR divided by 12, fixed minimum payments, optional fixed extra payment, and no new charges, fees, promotional rates, variable rates, or exact statement due dates.
 - The Debt Repayment Planner caps simulations at the configured max projection months, and its optional monthly schedule displays only the first 24 months.
 - Load only one Financial Radar file at a time. `financial-radar.scm` and `financial-radar-5.15.scm` register the same report name and GUID.
-
-## License
-
-This project is free software released under the GNU General Public License,
-version 2 or later. See [COPYING](COPYING) for the full license text.
 
 #### Sinking fund Available in monthly views
 
@@ -414,3 +409,25 @@ Financial Radar (both supported versions) preserves signed net expense Actual
 values, including refund-only periods. Spending progress bars stay within 0–100%.
 Highest Spending excludes categories with net refunds; the emergency-fund monthly
 expense estimate uses zero when selected-period refunds exceed spending.
+
+Categories with nonzero posted, non-voided splits from the selected budget's first
+period through the selected ending period remain visible, even if the selected
+range has no activity or spending and refunds net to zero. Future transactions
+and activity before the budget start do not qualify. Included Accounts, Hidden
+Accounts, and Off Budget exclusions still apply. This visibility rule does not
+change selected-range Budgeted or Activity amounts, or their totals.
+
+`Options → Accounts → Show categories with earlier activity` controls this
+visibility rule and is checked by default. Uncheck it to show only categories
+with selected-range budget/activity or planning targets (unless Show all categories, including unused
+is also enabled). Hidden account exclusions apply in either mode.
+
+`Show all categories, including unused` displays every eligible leaf category,
+even without budget, activity, or a planning target. When enabled, it makes
+`Show categories with earlier activity` redundant. Both options respect account
+selection and exclusions.
+
+## License
+
+This project is free software released under the GNU General Public License,
+version 2 or later. See [COPYING](COPYING) for the full license text.
