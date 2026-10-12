@@ -385,7 +385,7 @@ Budget Report with Sinking Funds options are grouped by:
 - Budget Report with Sinking Funds calculates available as budgeted minus activity across the selected budget periods. It does not model cash envelopes, account transfers, goals, rollover caps, or separate real-world savings balances. The available value for asset or liability accounts reflects GnuCash budget activity only, not the account's actual balance.
 - Sinking Fund / Future Purchase "funded so far" (and the YTD column) is cumulative from the first period of the *currently selected* GnuCash budget through the selected ending period. If you start a new Budget object each fiscal year rather than continuing periods within one budget, that cumulative total restarts at $0 in the new budget even though real-world savings carried over. There is no cross-budget carryover mechanism.
 - `frequency=` recurrence covers monthly, bimonthly, quarterly, semiannual, and annual cycles anchored to a single `target-date`. It does not support arbitrary custom intervals or day-of-month precision. Occurrences are resolved to a calendar month, not an exact day. Multiple `item=` lines per account are supported, but multiple items are summarized as one combined monthly amount in the row.
-- Budget Report with Sinking Funds sums each period's absolute budget actual value, so opposite signs in different periods do not cancel each other out. Unusual account signs or journal corrections may still need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
+- Budget Report with Sinking Funds sums signed expense actuals, so refunds and rebates offset spending across periods. Other account types retain absolute per-period actuals. Unusual account signs or journal corrections may still need review in the underlying GnuCash budget data. When `Liability activity: payments only` is enabled, eligible liability/credit-card accounts instead sum posted, non-voided splits that reduce the balance within the selected budget periods, using the account's own commodity (no currency conversion).
 - Cash flow follows split signs on the selected cash/asset accounts, similar to GnuCash's built-in Cash Flow report. Selecting income, expense, or liability accounts can produce confusing results.
 - Upcoming Transactions uses scheduled transaction data. Projected Balances uses entered register transactions plus scheduled transaction data. They do not forecast from historical spending patterns.
 - The Financial Radar projected balance card uses the Upcoming Transactions look-ahead period as its projection horizon.
@@ -409,3 +409,8 @@ Budgeted minus Activity. The legend explains this distinction. Ordinary categori
 and Future Purchases retain their existing selected-range Available behavior.
 A real cumulative funding shortfall still appears negative. Carryover across
 separate Budget objects is not modeled.
+
+Financial Radar (both supported versions) preserves signed net expense Actual
+values, including refund-only periods. Spending progress bars stay within 0–100%.
+Highest Spending excludes categories with net refunds; the emergency-fund monthly
+expense estimate uses zero when selected-period refunds exceed spending.

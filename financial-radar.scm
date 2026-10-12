@@ -1521,13 +1521,13 @@ body {
   (let* ((fmt     (lambda (n) (fr-fmt-money n currency)))
          (totals  (fr-budget-period-totals budget expense-accounts t-start t-end))
          (planned (car totals))
-         (actual  (abs (cadr totals)))
+         (actual  (cadr totals))
          (periods (caddr totals))
          (diff    (- planned actual))
          (over?   (< diff 0))
          (pct-s   (if (> planned 0)
                       (number->string
-                       (inexact->exact (floor (min 100.0 (* 100.0 (/ actual planned))))))
+                       (inexact->exact (floor (min 100.0 (max 0.0 (* 100.0 (/ actual planned)))))))
                       "0"))
          (bar-col (cond ((> actual planned)          "red")
                         ((> actual (* planned 0.8))  "yellow")
@@ -1579,7 +1579,7 @@ body {
           (filter (lambda (x) (> (cdr x) 0.001))
                   (map (lambda (acc)
                          (cons (xaccAccountGetName acc)
-                               (abs (fr-sum-splits (list acc) t-start t-end))))
+                               (fr-sum-splits (list acc) t-start t-end)))
                        (fr-leaf-accounts expense-accounts))))
          (sorted  (sort data (lambda (a b) (> (cdr a) (cdr b)))))
          (top12    (fr-take sorted 12))
@@ -1707,7 +1707,7 @@ body {
           (/ period-secs (* 30.0 24 3600)))
 
          (total-period-expenses
-          (abs (fr-sum-splits ef-expenses t-start t-end)))
+          (max 0.0 (fr-sum-splits ef-expenses t-start t-end)))
 
          (monthly-exp
           (if (> period-months 0)

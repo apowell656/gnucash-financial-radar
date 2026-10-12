@@ -334,8 +334,8 @@
 ;;; inclusive, 0-based).  Setting start-period=0 gives full carry-
 ;;; forward from the beginning of the budget (YNAB style).  Setting
 ;;; start-period=end-period gives a single-period snapshot.
-;;; Activity uses each period's absolute actual value before summing,
-;;; so opposite signs in different periods cannot cancel each other out.
+;;; Expense Activity preserves signed actuals so rebates offset spending.
+;;; Other account types retain absolute per-period actuals.
 ;;; Available = Budgeted - Actual.  Negatives are preserved.
 ;;;============================================================
 
@@ -346,11 +346,15 @@
                 (iota (- (1+ end-period) start-period) start-period))))
 
 (define (bsf-cumulative-actual budget acct start-period end-period)
-  (apply + (map (lambda (p)
-                  (abs
-                   (gnc-numeric-to-double
-                    (gnc-budget-get-account-period-actual-value budget acct p))))
-                (iota (- (1+ end-period) start-period) start-period))))
+  (let ((expense? (= (xaccAccountGetType acct) ACCT-TYPE-EXPENSE)))
+    (apply + (map (lambda (p)
+                    (let ((actual
+                           (gnc-numeric-to-double
+                            (gnc-budget-get-account-period-actual-value budget acct p))))
+                      ;; Expense credits are rebates/refunds, not more spending.
+                      ;; Retain the existing sign convention for other account types.
+                      (if expense? actual (abs actual))))
+                  (iota (- (1+ end-period) start-period) start-period)))))
 
 ;;;============================================================
 ;;; LIABILITY PAYMENT-ONLY ACTIVITY (optional)
