@@ -77,6 +77,8 @@
 (define bsf-opt-exclude-off-budget  (N_ "Exclude Off Budget accounts"))
 (define bsf-opt-hidden-accounts     (N_ "Hidden Accounts"))
 (define bsf-opt-liability-payments-only (N_ "Liability activity: payments only"))
+(define bsf-opt-review-accounts (N_ "Accounts for Budget Period Review Hints"))
+(define bsf-opt-review-hints (N_ "Show Budget Period Review Hints"))
 (define bsf-opt-show-progress       (N_ "Show spending progress bars"))
 
 ;;;============================================================
@@ -203,6 +205,16 @@
       bsf-tab-display bsf-opt-show-progress "a"
       (N_ "Show a compact spending progress bar under each category name.")
       #t)
+
+    (gnc-register-simple-boolean-option options
+      bsf-tab-display bsf-opt-review-hints "b"
+      (N_ "Show estimated periods contributing to cumulative surpluses or deficits for selected ordinary categories. Opposite net changes cover the oldest contributions first (FIFO), from the budget start through the selected ending period.")
+      #f)
+
+    (gnc-register-account-list-option options
+      bsf-tab-display bsf-opt-review-accounts "c"
+      (N_ "Show review hints only for selected accounts and their sub-accounts. Unselected accounts have no hints; an empty selection shows no hints. Sinking funds and Future Purchases are always excluded.")
+      '())
 
     ;; All custom fields start disabled; the date-range callback
     ;; enables/disables period-start and period-end, and their own
@@ -433,6 +445,92 @@
                                            liability-payments-only?)))
              (cons acct (list bgt act (- bgt act)))))
          records)))
+
+;; Informational attribution only: period net surpluses, consumed oldest first.
+;; Integer currency units avoid floating point residue. Deficits first exhaust
+;; existing lots; any remaining deficit reduces subsequent surplus. A refund is
+;; a net increase in its posting period, not evidence of an original allocation.
+(define (bsf-review-surplus-lots changes)
+  (let loop ((xs changes) (period 0) (lots '()) (debt 0))
+    (if (null? xs)
+        lots
+        (let ((net (- (car xs) debt)))
+          (if (>= net 0)
+              (loop (cdr xs) (1+ period)
+                    (if (> net 0) (append lots (list (cons period net))) lots) 0)
+              (let consume ((remaining lots) (cost (- net)))
+                (cond
+                 ((null? remaining)
+                  (loop (cdr xs) (1+ period) '() cost))
+                 ((>= cost (cdar remaining))
+                  (consume (cdr remaining) (- cost (cdar remaining))))
+                 (else
+                  (loop (cdr xs) (1+ period)
+                        (cons (cons (caar remaining) (- (cdar remaining) cost))
+                              (cdr remaining)) 0)))))))))
+
+;; Mirror the same FIFO convention for a cumulative deficit: net surpluses
+;; cover the oldest deficits first. Preserve negative amounts in the result.
+;; This changes attribution only, never the budget or displayed balances.
+(define (bsf-review-lots changes)
+  (if (< (fold + 0 changes) 0)
+      (map (lambda (lot) (cons (car lot) (- (cdr lot))))
+           (bsf-review-surplus-lots (map - changes)))
+      (bsf-review-surplus-lots changes)))
+
+;; START describes the visible columns, but attribution always starts at zero:
+;; a current-month view must still explain money left from earlier months.
+;; Reconcile against cumulative net activity, never selected-range Available.
+(define (bsf-compute-review-data enabled? budget records targets start end
+                                 liability-payments-only? currency allowed-accounts)
+  (if (or (not enabled?) (null? allowed-accounts))
+      '()
+      (let* ((fraction (gnc-commodity-get-fraction currency))
+             (units (lambda (n) (inexact->exact (round (* n fraction))))))
+        (filter-map
+         (lambda (rec)
+           (and (eq? (bsf-category-type rec (assq (car rec) targets)) 'normal)
+                (bsf-account-under-any? (car rec) allowed-accounts)
+                (let* ((net-changes
+                        (map (lambda (p)
+                               (- (bsf-cumulative-budgeted budget (car rec) p p)
+                                  (bsf-select-actual budget (car rec) p p
+                                                     liability-payments-only?)))
+                             (iota (1+ end))))
+                       (lots (bsf-review-lots (map units net-changes))))
+                  ;; Suppress uncertain breakdowns (e.g. sub-unit rounding), and
+                  ;; rows with only current-period contributions. Never alter row values.
+                  (and (= (fold + 0 (map cdr lots))
+                          (units (fold + 0 net-changes)))
+                       (any (lambda (lot) (< (car lot) end)) lots)
+                       (cons (car rec)
+                             (map (lambda (lot)
+                                    (cons (car lot) (/ (cdr lot) fraction)))
+                                  lots))))))
+         records))))
+
+(define (bsf-render-review-hint budget lots currency)
+  (if (not (pair? lots))
+      ""
+      (string-append
+       "<div class='fp-plan'>Review budget period"
+       (if (= (length lots) 1) ": " "s: ")
+       (string-join
+        (map (lambda (lot)
+               (string-append
+                (gnc:html-string-sanitize
+                 (strftime "%b %Y" (localtime
+                                    (gnc-budget-get-period-start-date budget (car lot)))))
+                " (" (gnc:monetary->string
+                 (gnc:make-gnc-monetary
+                  currency (double-to-gnc-numeric
+                            (exact->inexact (cdr lot))
+                            (gnc-commodity-get-fraction currency) GNC-RND-ROUND))) ")"))
+             lots)
+        " · ")
+       (if (< (cdar lots) 0)
+           " — estimated cumulative deficit, net deficit FIFO</div>"
+           " — estimated cumulative balance, net surplus FIFO</div>"))))
 
 ;; Sinking funds retain prior savings when browsing a narrower period range.
 ;; Transform records before rendering so row, group and grand totals agree.
@@ -1263,7 +1361,7 @@ body {
 ;; Future Purchase "funded so far" must reflect true cumulative progress, not
 ;; just whatever date range is currently selected for display.
 (define (bsf-render-data-row rec currency indented? show-progress? fp-target
-                              show-ytd? ytd-entry)
+                              show-ytd? ytd-entry review-hint)
   (let* ((display-name (list-ref rec 1))
          (bgt          (list-ref rec 2))
          (act          (list-ref rec 3))
@@ -1284,6 +1382,7 @@ body {
      (bsf-category-badge cat-type)
      (bsf-fp-render-plan funded fp-target currency)
      (if show-progress? (bsf-render-progress-bar act bgt cls) "")
+     (if (eq? cat-type 'normal) review-hint "")
      "</td>"
      "<td class='col-num'>" (fmt bgt) "</td>"
      "<td class='col-num'>" (fmt act) "</td>"
@@ -1309,7 +1408,7 @@ body {
 ;; Always populated (used for Sinking Fund/Future Purchase funded-so-far math
 ;; even when show-ytd? is false and the reference column itself is hidden).
 (define (bsf-render-section-card section-name records currency show-progress?
-                                  plan-targets is-fp-section? show-ytd? ytd-data)
+                                  plan-targets is-fp-section? show-ytd? ytd-data review-hints)
   (let* ((fmt (lambda (n) (bsf-fmt-money n currency)))
          ;; For the FP section strip the "Future Purchases:" segment so the
          ;; section title is not echoed as a group header in the typical layout.
@@ -1375,7 +1474,8 @@ body {
                                                    r currency indented? show-progress?
                                                    (assq (list-ref r 0) plan-targets)
                                                    show-ytd?
-                                                   (assq (list-ref r 0) ytd-data)))
+                                                   (assq (list-ref r 0) ytd-data)
+                                                   (or (assq-ref review-hints (car r)) "")))
                                                 grecs))))
                      (string-append
                       "<tbody class='category-section'>"
@@ -1440,7 +1540,7 @@ body {
 ;;;============================================================
 
 (define (bsf-render-all-sections records currency show-progress? plan-targets
-                                  included-accounts show-ytd? ytd-data)
+                                  included-accounts show-ytd? ytd-data review-hints)
   (cond
     ((null? included-accounts)
      (string-append
@@ -1481,14 +1581,14 @@ body {
                        (xaccAccountGetName (car sec))
                        (cdr sec)
                        currency show-progress? plan-targets #f
-                       show-ytd? ytd-data))
+                       show-ytd? ytd-data review-hints))
                     section-data))
         (if (null? fp-records)
             ""
             (bsf-render-section-card
              "Future Purchases" fp-records
              currency show-progress? plan-targets #t
-             show-ytd? ytd-data))
+             show-ytd? ytd-data review-hints))
         (bsf-render-grand-total-card gt-bgt gt-act gt-avl currency
                                      show-ytd? gt-ytd))))))
 
@@ -1559,6 +1659,9 @@ body {
           (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-accounts bsf-opt-liability-payments-only))))
          (show-progress      (not (equal? #f (gnc-optiondb-lookup-value options bsf-tab-display bsf-opt-show-progress))))
 
+         (review-accounts (or (gnc-optiondb-lookup-value options bsf-tab-display bsf-opt-review-accounts) '()))
+         (show-review-hints? (eq? #t (gnc-optiondb-lookup-value options bsf-tab-display bsf-opt-review-hints)))
+
          (report-title (let ((n (gnc:report-name report-obj)))
                          (if (and n (not (string=? n "")))
                              n
@@ -1614,7 +1717,14 @@ body {
                   (ytd-data       (bsf-compute-ytd-data
                                     budget records liability-payments-only? end-period))
                   (display-records
-                   (bsf-include-sinking-carryover records plan-targets ytd-data)))
+                   (bsf-include-sinking-carryover records plan-targets ytd-data))
+                  (review-hints
+                   (map (lambda (entry)
+                          (cons (car entry)
+                                (bsf-render-review-hint budget (cdr entry) currency)))
+                        (bsf-compute-review-data show-review-hints? budget records
+                                                 plan-targets start-period end-period
+                                                 liability-payments-only? currency review-accounts))))
 
              (string-append
 
@@ -1632,7 +1742,7 @@ body {
 
               ;; ── Section cards ────────────────────────────────────
               (bsf-render-all-sections display-records currency show-progress plan-targets
-                                       included-accounts show-ytd? ytd-data)
+                                       included-accounts show-ytd? ytd-data review-hints)
 
               ;; ── Legend ───────────────────────────────────────────
               (bsf-render-legend)))))))

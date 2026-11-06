@@ -3,3 +3,7 @@ test_files/
 
 .DS_Store
 
+# Keep the review-hint regression suite visible despite local tests exclusions.
+!/tests/
+/tests/*
+!/tests/budget-review-hints.scm

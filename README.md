@@ -110,6 +110,7 @@ It provides a YNAB / Actual Budget-style view of budget categories using:
 - Optional hidden-account filtering
 - Automatic exclusion of `Off Budget` account trees
 - Optional compact spending progress bars
+- Optional Budget Period Review Hints for selected ordinary categories
 - Automatic sinking fund and future purchase badges
 
 Available is calculated as:
@@ -136,6 +137,100 @@ The rendered output is divided into one card per non-empty included-account root
 #### YTD reference column
 
 When the selected `Options → General → Date range` is anything other than `Year to date`, the report adds an extra `YTD` column to every section table, group header, and totals row. It shows each row's cumulative available balance from the first budget period through the selected ending period, including periods before the selected range (`This month only`, `Last month only`, a custom range, etc.). Selecting `Year to date` itself hides the column, since it would just repeat the Available figure already shown.
+
+#### Budget Period Review Hints
+
+Budget Period Review Hints help identify which earlier budget periods to review
+when an ordinary category has money left over or an uncovered cumulative deficit.
+The feature is optional and off by default.
+
+To enable it:
+
+1. Open **Options → Display** and check **Show Budget Period Review Hints**.
+2. In **Accounts for Budget Period Review Hints**, select the categories you want
+   to investigate, such as **Example Utility**.
+3. Click **Apply** to refresh the report, and save the report configuration if you
+   want to reuse these settings.
+
+**Selection means inclusion:** selected accounts may show hints; unselected
+accounts do not. Selecting a parent also includes its sub-accounts. An empty
+selection shows no hints, even when the checkbox is enabled. For example, select
+Example Utility and leave Groceries unselected to show hints only for Example Utility.
+This selection controls annotations only; it does not hide category rows or change
+the report's Included Accounts setting. Sinking funds and Future Purchases never
+show these hints, even when selected.
+
+Hints automatically follow the cumulative balance through the selected ending
+period; no separate surplus or deficit setting is needed:
+
+| Cumulative balance | Hint behavior |
+|---|---|
+| Positive | Lists the periods contributing to the remaining surplus |
+| Negative | Lists the periods contributing to the uncovered deficit |
+| Zero | No hint |
+
+A historical contribution must remain for a hint to appear. Hints appear as
+secondary text beneath the category progress bar:
+
+```text
+Review budget period: Jul 2026 ($200.00) — estimated cumulative balance, net surplus FIFO
+
+Review budget periods: Jul 2026 ($100.00) · Aug 2026 ($75.00) · Sep 2026 ($25.00) — estimated cumulative balance, net surplus FIFO
+```
+
+All remaining contributions appear chronologically, using the reporting currency
+and its precision, including small residuals such as $0.36. Zero contributions are
+omitted. A hint appears only when a contribution from before the selected ending
+period remains. Review the listed periods manually in GnuCash; the hint does not
+open another report or make corrections.
+
+**Current-month views include earlier surpluses and deficits.** Attribution starts at the first
+period of the selected budget and ends at the report's selected ending period.
+For example, Example Utility can show $0.00 in the current month's Available column
+and $200.00 in YTD, with a hint identifying July's $200.00 contribution. The hint
+explains the cumulative balance shown by YTD, rather than the narrower monthly
+Available figure. Future periods are excluded.
+
+**Deficits work the same way.** For example, synthetic October travel spending
+of $4,000 with no offsetting budget allocation produces a November YTD deficit
+of $4,000. Its hint identifies October as the contributing period:
+
+```text
+Review budget period: Oct 2026 (−$4,000.00) — estimated cumulative deficit, net deficit FIFO
+```
+
+The currency formatter determines the exact negative-money notation. If November
+adds a net surplus of $1,000, the remaining October deficit contribution becomes
+−$3,000. With multiple deficits, later surpluses cover the oldest deficit first;
+previous surpluses also offset later deficits. Fully covered deficits disappear.
+The same checkbox, selected accounts, historical cutoff, and category exclusions
+apply to both surplus and deficit hints.
+
+**How to interpret the estimate:** GnuCash's budget totals do not link individual
+expenses to particular allocations. The hints use a net surplus FIFO convention
+(first in, first out): each period's Budgeted minus Activity creates a surplus or
+deficit. Later deficits consume the oldest surplus first; earlier deficits reduce
+subsequent surpluses. For a negative cumulative balance, the calculation mirrors
+this convention: surpluses cover the oldest deficits first. Carrying money forward
+does not create another contribution.
+Refunds and allocation adjustments affect the net change in their own period, so
+a listed contribution need not be an original allocation.
+
+The listed amounts sum to cumulative Available through the selected ending period,
+including any remaining current-period contribution. If rounding to currency units
+cannot reconcile the breakdown with that balance, the hint is omitted.
+
+The checkbox and account selection use the normal saved report options and refresh
+behavior. Disabling the feature or leaving its account selection empty skips
+attribution calculations. Existing balances, totals, category order, and progress
+bars are unchanged; no budgets, transactions, or account balances are modified.
+
+Developer checks (requires Guile; run from the repository root):
+
+```sh
+guile --no-auto-compile tests/sinking-funds.scm
+guile --no-auto-compile tests/budget-review-hints.scm
+```
 
 #### Sinking Fund and Future Purchase planning targets
 
